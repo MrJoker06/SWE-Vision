@@ -2,15 +2,14 @@
 Trajectory Viewer — A Flask app to visualize VLM Tool Call agent trajectories.
 
 Usage:
-    python trajectory_viewer.py                                    # auto-detect ./trajectories/
-    python trajectory_viewer.py /path/to/trajectories/latest       # specific trajectory dir
-    python trajectory_viewer.py --port 8888                        # custom port
+    python apps/trajectory_viewer.py                                    # auto-detect ./trajectories/
+    python apps/trajectory_viewer.py /path/to/trajectories/latest       # specific trajectory dir
+    python apps/trajectory_viewer.py --port 8888                        # custom port
 
 Open http://localhost:5050 in your browser.
 """
 
 import argparse
-import glob
 import json
 import os
 import sys
@@ -277,6 +276,23 @@ VIEW_TEMPLATE = r"""
   }
 
   .error-text { color: var(--red); }
+
+  /* Reasoning / Thinking block */
+  .reasoning-block {
+    background: rgba(210,153,34,0.08); border: 1px solid rgba(210,153,34,0.25);
+    border-radius: 8px; padding: 12px 14px; margin: 10px 0;
+  }
+  .reasoning-block .reasoning-header {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    font-size: 12px; font-weight: 700; color: var(--yellow); user-select: none;
+  }
+  .reasoning-block .reasoning-content {
+    margin-top: 8px; font-size: 13px; color: var(--text-muted);
+    white-space: pre-wrap; line-height: 1.6; display: none;
+  }
+  .reasoning-block.open .reasoning-content { display: block; }
+  .reasoning-block .reasoning-toggle { transition: transform 0.2s; font-size: 14px; }
+  .reasoning-block.open .reasoning-toggle { transform: rotate(90deg); }
 </style>
 </head>
 <body>
@@ -340,6 +356,9 @@ VIEW_TEMPLATE = r"""
           {% if step.images %}
             <span style="font-size:12px;color:var(--purple);">🖼 {{ step.images|length }}</span>
           {% endif %}
+          {% if step.reasoning or step.reasoning_details %}
+            <span style="font-size:12px;color:var(--yellow);">💭</span>
+          {% endif %}
           <span class="preview">{{ (step.content_text or '')[:80] }}</span>
         </div>
         <div style="display:flex;align-items:center;gap:12px;">
@@ -363,6 +382,29 @@ VIEW_TEMPLATE = r"""
               <img src="/image/{{ run_name }}/{{ img }}" alt="{{ img }}" onclick="openLightbox(this.src)" loading="lazy">
             {% endfor %}
           </div>
+        {% endif %}
+
+        {# ─── Reasoning / Thinking ─── #}
+        {% if step.reasoning %}
+          <div class="reasoning-block open">
+            <div class="reasoning-header" onclick="this.parentElement.classList.toggle('open')">
+              <span class="reasoning-toggle">▸</span>
+              <span>💭 Reasoning</span>
+            </div>
+            <div class="reasoning-content">{{ step.reasoning }}</div>
+          </div>
+        {% elif step.reasoning_details %}
+          {% for rd in step.reasoning_details %}
+            {% if rd.type == 'reasoning.summary' and rd.summary %}
+              <div class="reasoning-block open">
+                <div class="reasoning-header" onclick="this.parentElement.classList.toggle('open')">
+                  <span class="reasoning-toggle">▸</span>
+                  <span>💭 Reasoning</span>
+                </div>
+                <div class="reasoning-content">{{ rd.summary }}</div>
+              </div>
+            {% endif %}
+          {% endfor %}
         {% endif %}
 
         {# ─── Assistant text ─── #}
@@ -460,24 +502,139 @@ document.addEventListener('keydown', e => {
 # ─────────────────────────────────────────────────────────────────────
 
 def find_trajectory_dirs(root: str):
-    """Find all directories containing a trajectory.json file."""
+    """Find all directories containing trajectory.json or messages_raw.json."""
     results = []
     for dirpath, dirnames, filenames in os.walk(root):
-        if "trajectory.json" in filenames:
+        if "trajectory.json" in filenames or "messages_raw.json" in filenames:
             results.append(dirpath)
-    results.sort(key=lambda d: os.path.getmtime(os.path.join(d, "trajectory.json")), reverse=True)
+    def _sort_key(d):
+        for name in ("trajectory.json", "messages_raw.json"):
+            p = os.path.join(d, name)
+            if os.path.isfile(p):
+                return os.path.getmtime(p)
+        return 0
+    results.sort(key=_sort_key, reverse=True)
     return results
 
 
+def detect_format(traj_dir: str) -> str:
+    if os.path.isfile(os.path.join(traj_dir, "trajectory.json")):
+        return "trajectory"
+    if os.path.isfile(os.path.join(traj_dir, "messages_raw.json")):
+        return "raw"
+    return "none"
+
+
 def load_trajectory(traj_dir: str):
-    """Load trajectory.json from a directory."""
     path = os.path.join(traj_dir, "trajectory.json")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
+def load_raw_messages(traj_dir: str):
+    path = os.path.join(traj_dir, "messages_raw.json")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _extract_content(content):
+    text_parts = []
+    images = []
+    if content is None:
+        return "", images
+    if isinstance(content, str):
+        return content, images
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item.get("type") == "image_url":
+                    url = item.get("image_url", {}).get("url", "")
+                    if url:
+                        images.append(url)
+            elif isinstance(item, str):
+                text_parts.append(item)
+    return "\n".join(text_parts).strip(), images
+
+
+def _extract_reasoning(msg: dict) -> tuple:
+    reasoning = msg.get("reasoning") or None
+    reasoning_details = msg.get("reasoning_details") or None
+    if not reasoning and reasoning_details:
+        for rd in reasoning_details:
+            if rd.get("type") == "reasoning.summary" and rd.get("summary"):
+                reasoning = rd["summary"]
+                break
+    return reasoning, reasoning_details
+
+
+def convert_raw_to_steps(messages: list) -> tuple:
+    """Convert raw OpenAI-style messages into the step format used by the viewer."""
+    steps = []
+    step_num = 0
+    system_prompt = None
+    user_query = None
+    final_answer = None
+
+    for msg in messages:
+        role = msg.get("role", "unknown")
+
+        if role == "system":
+            system_prompt = msg.get("content", "")
+            continue
+
+        content_text, images = _extract_content(msg.get("content"))
+        reasoning, reasoning_details = _extract_reasoning(msg)
+
+        tool_calls_raw = msg.get("tool_calls") or []
+        tool_calls = []
+        for tc in tool_calls_raw:
+            fn = tc.get("function", {})
+            tool_calls.append({
+                "id": tc.get("id", ""),
+                "name": fn.get("name", ""),
+                "arguments": fn.get("arguments", ""),
+            })
+
+        if role == "user" and user_query is None:
+            user_query = content_text
+
+        if role == "assistant" and tool_calls:
+            for tc in tool_calls:
+                args = parse_tool_args(tc.get("arguments", ""))
+                if tc["name"] == "finish" and args.get("answer"):
+                    final_answer = args["answer"]
+
+        step = {
+            "step": step_num,
+            "role": role,
+            "timestamp": "",
+            "content_text": content_text,
+            "tool_calls": tool_calls if tool_calls else None,
+            "tool_call_id": msg.get("tool_call_id"),
+            "code": None,
+            "images": images,
+            "reasoning": reasoning,
+            "reasoning_details": reasoning_details,
+        }
+        steps.append(step)
+        step_num += 1
+
+    meta = {
+        "query": user_query or "(no query)",
+        "model": "—",
+        "total_steps": len(steps),
+        "start_time": "—",
+        "end_time": "—",
+        "max_iterations": "—",
+        "system_prompt": system_prompt or "",
+    }
+
+    return meta, steps, final_answer
+
+
 def count_images(traj_dir: str) -> int:
-    """Count images in the trajectory images dir."""
     img_dir = os.path.join(traj_dir, "images")
     if not os.path.isdir(img_dir):
         return 0
@@ -485,7 +642,6 @@ def count_images(traj_dir: str) -> int:
 
 
 def parse_tool_args(args_str: str) -> dict:
-    """Parse a JSON arguments string, returning a dict."""
     try:
         return json.loads(args_str)
     except (json.JSONDecodeError, TypeError):
@@ -502,18 +658,32 @@ def index():
     runs = []
     for d in traj_dirs:
         try:
-            data = load_trajectory(d)
-            meta = data.get("metadata", {})
+            fmt = detect_format(d)
             rel_name = os.path.relpath(d, TRAJECTORIES_ROOT)
-            runs.append({
-                "name": rel_name,
-                "query": meta.get("query", "(no query)"),
-                "model": meta.get("model", "—"),
-                "start_time": meta.get("start_time", "—"),
-                "total_steps": meta.get("total_steps", len(data.get("steps", []))),
-                "final_answer": data.get("final_answer"),
-                "image_count": count_images(d),
-            })
+            if fmt == "trajectory":
+                data = load_trajectory(d)
+                meta = data.get("metadata", {})
+                runs.append({
+                    "name": rel_name,
+                    "query": meta.get("query", "(no query)"),
+                    "model": meta.get("model", "—"),
+                    "start_time": meta.get("start_time", "—"),
+                    "total_steps": meta.get("total_steps", len(data.get("steps", []))),
+                    "final_answer": data.get("final_answer"),
+                    "image_count": count_images(d),
+                })
+            elif fmt == "raw":
+                messages = load_raw_messages(d)
+                meta, steps, final_answer = convert_raw_to_steps(messages)
+                runs.append({
+                    "name": rel_name,
+                    "query": meta.get("query", "(no query)"),
+                    "model": meta.get("model", "—"),
+                    "start_time": meta.get("start_time", "—"),
+                    "total_steps": meta.get("total_steps", len(steps)),
+                    "final_answer": final_answer,
+                    "image_count": count_images(d),
+                })
         except Exception:
             continue
     return render_template_string(INDEX_TEMPLATE, runs=runs, root=TRAJECTORIES_ROOT)
@@ -522,14 +692,19 @@ def index():
 @app.route("/view/<path:run_name>")
 def view_trajectory(run_name: str):
     traj_dir = os.path.join(TRAJECTORIES_ROOT, run_name)
-    traj_path = os.path.join(traj_dir, "trajectory.json")
-    if not os.path.isfile(traj_path):
+    fmt = detect_format(traj_dir)
+    if fmt == "none":
         abort(404, f"Trajectory not found: {run_name}")
 
-    data = load_trajectory(traj_dir)
-    meta = data.get("metadata", {})
-    steps = data.get("steps", [])
-    final_answer = data.get("final_answer")
+    if fmt == "trajectory":
+        data = load_trajectory(traj_dir)
+        meta = data.get("metadata", {})
+        steps = data.get("steps", [])
+        final_answer = data.get("final_answer")
+    else:
+        messages = load_raw_messages(traj_dir)
+        meta, steps, final_answer = convert_raw_to_steps(messages)
+
     img_count = count_images(traj_dir)
 
     return render_template_string(
@@ -545,10 +720,8 @@ def view_trajectory(run_name: str):
 
 @app.route("/image/<path:img_path>")
 def serve_image(img_path: str):
-    """Serve images from trajectory directories."""
     full_path = os.path.join(TRAJECTORIES_ROOT, img_path)
     full_path = os.path.realpath(full_path)
-    # Security: ensure the path is under TRAJECTORIES_ROOT
     if not full_path.startswith(os.path.realpath(TRAJECTORIES_ROOT)):
         abort(403)
     if not os.path.isfile(full_path):
@@ -579,9 +752,8 @@ def main():
     else:
         candidate = os.path.abspath("trajectories")
 
-    # If user pointed directly to a trajectory dir (contains trajectory.json),
-    # use its parent as root
-    if os.path.isfile(os.path.join(candidate, "trajectory.json")):
+    if os.path.isfile(os.path.join(candidate, "trajectory.json")) or \
+       os.path.isfile(os.path.join(candidate, "messages_raw.json")):
         TRAJECTORIES_ROOT = os.path.dirname(candidate)
     else:
         TRAJECTORIES_ROOT = candidate

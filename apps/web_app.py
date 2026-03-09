@@ -1,11 +1,11 @@
 """
-SWE-VLM Web App — ChatGPT-style interface for the VLM Tool Call Agent.
+SWE-Vision Web App — ChatGPT-style interface for the VLM Tool Call Agent.
 
 Upload images, enter prompts, and watch the agent reason step-by-step
 with real-time streaming of tool calls, code execution, and results.
 
 Usage:
-    python web_app.py [--port 8080] [--host 0.0.0.0]
+    python apps/web_app.py [--port 8080] [--host 0.0.0.0]
 
 Then open http://localhost:8080 in your browser.
 """
@@ -33,13 +33,16 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 # ---------------------------------------------------------------------------
-# Import the agent module (same directory)
+# Ensure the project root is on sys.path so ``import swe_vision`` works
+# when running this script directly (e.g. ``python apps/web_app.py``).
 # ---------------------------------------------------------------------------
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 try:
-    import sample_vlm_toolcall_docker as agent_mod
+    from swe_vision.agent import VLMToolCallAgent
+    from swe_vision.trajectory import TrajectoryRecorder
     AGENT_AVAILABLE = True
     AGENT_IMPORT_ERROR = ""
 except ImportError as e:
@@ -66,7 +69,7 @@ sessions: dict = {}
 # Streaming Trajectory Recorder
 # ═══════════════════════════════════════════════════════════════════
 
-class StreamingTrajectoryRecorder(agent_mod.TrajectoryRecorder if AGENT_AVAILABLE else object):
+class StreamingTrajectoryRecorder(TrajectoryRecorder if AGENT_AVAILABLE else object):
     """Extends TrajectoryRecorder to push SSE events to a queue."""
 
     def __init__(self, save_dir, event_queue, session_id):
@@ -144,7 +147,7 @@ class StreamingTrajectoryRecorder(agent_mod.TrajectoryRecorder if AGENT_AVAILABL
 # ═══════════════════════════════════════════════════════════════════
 
 if AGENT_AVAILABLE:
-    class WebVLMAgent(agent_mod.VLMToolCallAgent):
+    class WebVLMAgent(VLMToolCallAgent):
         """VLMToolCallAgent that streams steps to an SSE queue."""
 
         def __init__(self, event_queue, session_id, **kwargs):
@@ -157,7 +160,7 @@ if AGENT_AVAILABLE:
             recorder = StreamingTrajectoryRecorder(save_dir, self._event_queue, self._session_id)
             recorder.set_metadata(
                 model=self.model,
-                start_time=agent_mod.TrajectoryRecorder._now_iso(),
+                start_time=TrajectoryRecorder._now_iso(),
                 query=query,
                 image_paths=image_paths or [],
                 max_iterations=self.max_iterations,
@@ -178,7 +181,7 @@ def run_agent_thread(event_queue, session_id, prompt, image_paths, config):
     agent = WebVLMAgent(
         event_queue=event_queue,
         session_id=session_id,
-        model=config.get("model", "gpt-4o"),
+        model=config.get("model", "openai/gpt-5.2"),
         api_key=config.get("api_key") or None,
         base_url=config.get("base_url") or None,
         max_iterations=config.get("max_iterations", 30),
@@ -223,7 +226,7 @@ def api_chat():
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
 
-    model = request.form.get("model", "gpt-4o")
+    model = request.form.get("model", "openai/gpt-5.2")
     api_key = request.form.get("api_key", "")
     base_url = request.form.get("base_url", "")
     reasoning = request.form.get("reasoning", "true") == "true"
@@ -314,7 +317,7 @@ HTML_TEMPLATE = r"""
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SWE-VLM Agent</title>
+<title>SWE-Vision Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
@@ -967,11 +970,11 @@ body {
 <div class="header">
   <div class="logo">
     <div class="logo-icon">V</div>
-    <span>SWE-VLM Agent</span>
+    <span>SWE-Vision Agent</span>
   </div>
   <div class="header-actions">
     <button class="btn-icon" onclick="clearChat()" title="New Chat">+</button>
-    <button class="btn-icon" onclick="openSettings()" title="Settings">⚙</button>
+    <button class="btn-icon" onclick="openSettings()" title="Settings">&#9881;</button>
   </div>
 </div>
 
@@ -979,7 +982,7 @@ body {
 <div class="chat-container" id="chatContainer">
   <div class="chat-messages" id="chatMessages">
     <div class="welcome" id="welcome">
-      <h2>SWE-VLM Agent</h2>
+      <h2>SWE-Vision Agent</h2>
       <p>Upload an image and ask a question. The agent will use a Jupyter notebook to analyze it step-by-step, showing you its reasoning and code execution in real time.</p>
     </div>
   </div>
@@ -1007,7 +1010,7 @@ body {
 <!-- Settings -->
 <div class="settings-overlay" id="settingsOverlay" onclick="if(event.target===this)closeSettings()">
   <div class="settings-panel">
-    <h3>Settings <button class="close-btn" onclick="closeSettings()">×</button></h3>
+    <h3>Settings <button class="close-btn" onclick="closeSettings()">&times;</button></h3>
     <div class="form-group">
       <label>API Key</label>
       <input type="password" id="settApiKey" placeholder="sk-...">
@@ -1020,7 +1023,7 @@ body {
     </div>
     <div class="form-group">
       <label>Model</label>
-      <input type="text" id="settModel" placeholder="gpt-4o">
+      <input type="text" id="settModel" placeholder="openai/gpt-5.2">
     </div>
     <div class="form-group">
       <label>Max Iterations</label>
@@ -1046,17 +1049,17 @@ body {
 </div>
 
 <script>
-// ─── State ───
+// --- State ---
 let uploadedFiles = [];
 let isProcessing = false;
 let currentEventSource = null;
 
-// ─── Settings ───
+// --- Settings ---
 function loadSettings() {
   return {
     apiKey: localStorage.getItem('vlm_api_key') || '',
     baseUrl: localStorage.getItem('vlm_base_url') || '',
-    model: localStorage.getItem('vlm_model') || 'gpt-4o',
+    model: localStorage.getItem('vlm_model') || 'openai/gpt-5.2',
     maxIter: parseInt(localStorage.getItem('vlm_max_iter') || '30'),
     reasoning: localStorage.getItem('vlm_reasoning') !== 'false',
   };
@@ -1083,7 +1086,7 @@ function closeSettings() {
   document.getElementById('settingsOverlay').classList.remove('open');
 }
 
-// ─── UI Helpers ───
+// --- UI Helpers ---
 function scrollToBottom() {
   const c = document.getElementById('chatContainer');
   requestAnimationFrame(() => { c.scrollTop = c.scrollHeight; });
@@ -1114,14 +1117,14 @@ function clearChat() {
   if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
   document.getElementById('chatMessages').innerHTML = `
     <div class="welcome" id="welcome">
-      <h2>SWE-VLM Agent</h2>
+      <h2>SWE-Vision Agent</h2>
       <p>Upload an image and ask a question. The agent will use a Jupyter notebook to analyze it step-by-step.</p>
     </div>`;
   isProcessing = false;
   document.getElementById('sendBtn').disabled = false;
 }
 
-// ─── File Upload ───
+// --- File Upload ---
 const fileInput = document.getElementById('fileInput');
 fileInput.addEventListener('change', () => {
   for (const f of fileInput.files) addFile(f);
@@ -1148,7 +1151,7 @@ function renderPreviews() {
     img.src = URL.createObjectURL(f);
     const btn = document.createElement('button');
     btn.className = 'remove-btn';
-    btn.textContent = '×';
+    btn.textContent = '\u00d7';
     btn.onclick = () => removeFile(i);
     thumb.append(img, btn);
     el.append(thumb);
@@ -1164,7 +1167,7 @@ document.addEventListener('drop', e => {
   for (const f of e.dataTransfer.files) addFile(f);
 });
 
-// ─── Markdown ───
+// --- Markdown ---
 marked.setOptions({
   breaks: true,
   gfm: true,
@@ -1181,7 +1184,7 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ─── Message Rendering ───
+// --- Message Rendering ---
 function addUserMessage(text, files) {
   const wel = document.getElementById('welcome');
   if (wel) wel.remove();
@@ -1230,7 +1233,7 @@ function updateLoadingText(text) {
   if (el) el.querySelector('span').textContent = text;
 }
 
-// ─── Event Handlers ───
+// --- Event Handlers ---
 function handleEvent(event, container) {
   switch (event.type) {
     case 'status':
@@ -1245,7 +1248,7 @@ function handleEvent(event, container) {
       const preview = content.substring(0, 80) + (content.length > 80 ? '...' : '');
       card.innerHTML = `
         <div class="thinking-header" onclick="this.parentElement.classList.toggle('open')">
-          <span class="arrow">▸</span>
+          <span class="arrow">\u25b8</span>
           <span>Thinking</span>
           <span style="color:var(--text-muted);font-weight:400;font-size:12px;margin-left:auto;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(preview)}</span>
         </div>
@@ -1280,7 +1283,7 @@ function handleEvent(event, container) {
       const highlighted = code ? hljs.highlight(code, {language: 'python'}).value : '';
       card.innerHTML = `
         <div class="toolcall-label">
-          <span class="fn-icon">⚡</span>
+          <span class="fn-icon">\u26a1</span>
           <span class="fn-badge">${escapeHtml(event.data.name)}</span>
         </div>
         <div class="toolcall-code">
@@ -1327,7 +1330,7 @@ function handleEvent(event, container) {
       const card = document.createElement('div');
       card.className = 'finish-card';
       card.innerHTML = `
-        <div class="finish-label">✓ Final Answer</div>
+        <div class="finish-label">\u2713 Final Answer</div>
         <div class="finish-text">${renderMarkdown(event.data.answer)}</div>
       `;
       container.append(card);
@@ -1360,7 +1363,7 @@ function copyCode(btn) {
   });
 }
 
-// ─── Send Message ───
+// --- Send Message ---
 async function sendMessage() {
   const input = document.getElementById('promptInput');
   const prompt = input.value.trim();
@@ -1431,7 +1434,7 @@ async function sendMessage() {
   }
 }
 
-// ─── Init ───
+// --- Init ---
 document.getElementById('promptInput').focus();
 </script>
 </body>
@@ -1444,13 +1447,13 @@ document.getElementById('promptInput').focus();
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="SWE-VLM Web App")
+    parser = argparse.ArgumentParser(description="SWE-Vision Web App")
     parser.add_argument("--port", "-p", type=int, default=8080)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    print(f"\n  SWE-VLM Web App")
+    print(f"\n  SWE-Vision Web App")
     print(f"  Agent available: {AGENT_AVAILABLE}")
     if not AGENT_AVAILABLE:
         print(f"  Agent import error: {AGENT_IMPORT_ERROR}")
