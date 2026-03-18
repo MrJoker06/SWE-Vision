@@ -35,10 +35,6 @@ SWE-Vision/
 │   ├── web_app.py               # ChatGPT-style web UI (Flask + SSE streaming)
 │   └── trajectory_viewer.py     # Trajectory visualization dashboard (Flask)
 │
-├── src/                         # Legacy wrappers (backward compatibility)
-│   ├── sample_vlm_toolcall_docker.py
-│   └── utils.py
-│
 ├── env/                         # Docker environment (Dockerfile for the kernel)
 ├── requirements.txt
 └── README.md
