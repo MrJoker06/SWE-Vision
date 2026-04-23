@@ -27,6 +27,7 @@ Thumbs.db
 .env
 
 # Result
-trajectories/
+trajectories/*
+!trajectories/.gitkeep
 
 
