@@ -16,6 +16,7 @@ venv/
 .vscode/
 *.swp
 *.swo
+.codex
 
 # OS
 .DS_Store
@@ -24,3 +25,8 @@ Thumbs.db
 
 # Environment & secrets
 .env
+
+# Result
+.trajectories/
+
+

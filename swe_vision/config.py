@@ -6,6 +6,11 @@ import datetime
 import logging
 import os
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # Optional at runtime; install via requirements.txt
+    load_dotenv = None
+
 # ─────────────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────────────
@@ -14,6 +19,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("vlm_agent")
+
+# Load .env from project root so direct Python/IDE runs also get env vars.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DOTENV_PATH = os.path.join(_PROJECT_ROOT, ".env")
+if load_dotenv is not None:
+    load_dotenv(_DOTENV_PATH, override=False)
 
 # ─────────────────────────────────────────────────────────────────────
 # Constants
@@ -39,7 +50,6 @@ HOST_WORK_DIR = os.path.join(
 # Docker image / build settings
 DOCKER_IMAGE_NAME = os.environ.get("VLM_DOCKER_IMAGE", "swe-vision:latest")
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCKERFILE_DIR = os.environ.get(
     "VLM_DOCKERFILE_DIR",
     os.path.join(_PROJECT_ROOT, "env"),

@@ -136,22 +136,44 @@ class JupyterNotebookKernel:
             container_name, self._docker_image,
             self._host_work_dir, self._container_work_dir,
         )
-
-        self._container = self._docker_client.containers.run(
-            image=self._docker_image,
-            name=container_name,
-            command="sleep infinity",
-            ports=port_bindings,
-            volumes={
-                self._host_work_dir: {
-                    "bind": self._container_work_dir,
-                    "mode": "rw",
+        try:
+            self._container = self._docker_client.containers.run(
+                image=self._docker_image,
+                name=container_name,
+                command="sleep infinity",
+                ports=port_bindings,
+                volumes={
+                    self._host_work_dir: {
+                        "bind": self._container_work_dir,
+                        "mode": "rw",
+                    },
                 },
-            },
-            working_dir=self._container_work_dir,
-            detach=True,
-            remove=False,
-        )
+                working_dir=self._container_work_dir,
+                detach=True,
+                remove=False,
+            )
+        except Exception:
+            # Docker can leave a Created container behind if port binding fails
+            # before the SDK returns the container object.
+            try:
+                leftovers = self._docker_client.containers.list(
+                    all=True,
+                    filters={"name": container_name},
+                )
+                for container in leftovers:
+                    try:
+                        container.remove(force=True)
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            "Failed to remove leftover container '%s': %s",
+                            container.name, cleanup_error,
+                        )
+            except Exception as lookup_error:
+                logger.warning(
+                    "Failed to look up leftover container '%s': %s",
+                    container_name, lookup_error,
+                )
+            raise
         logger.info("Container '%s' started (id=%s).", container_name, self._container.short_id)
 
     def _start_kernel_in_container(self, connection_file: str):

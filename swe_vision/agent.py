@@ -65,9 +65,12 @@ class VLMToolCallAgent:
 
         self.client = OpenAI(**client_kwargs)
 
+        effective_api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        effective_base_url = base_url or client_kwargs.get("base_url")
+
         print(f"Using model: {self.model}")
-        print(f"Using API key: {api_key}")
-        print(f"Using base URL: {base_url}")
+        print(f"Using API key: {'set' if effective_api_key else 'None'}")
+        print(f"Using base URL: {effective_base_url or 'OpenAI default'}")
 
         self.kernel: Optional[JupyterNotebookKernel] = None
         self.file_manager = NotebookFileManager()
@@ -136,7 +139,7 @@ class VLMToolCallAgent:
             tool_choice="auto",
         )
         if self.reasoning:
-            kwargs["extra_body"] = {"reasoning": {"enabled": True, 'effort': 'xhigh'}}
+            # kwargs["extra_body"] = {"reasoning": {"enabled": True, 'effort': 'xhigh'}}
             kwargs["reasoning_effort"] = 'xhigh'
         else:
             kwargs["extra_body"] = {"reasoning": {"enabled": False, 'effort': 'minimal'}}

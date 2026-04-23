@@ -181,7 +181,7 @@ def run_agent_thread(event_queue, session_id, prompt, image_paths, config):
     agent = WebVLMAgent(
         event_queue=event_queue,
         session_id=session_id,
-        model=config.get("model", "openai/gpt-5.2"),
+        model=config.get("model", "gpt-5.4"),
         api_key=config.get("api_key") or None,
         base_url=config.get("base_url") or None,
         max_iterations=config.get("max_iterations", 30),
@@ -226,7 +226,7 @@ def api_chat():
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
 
-    model = request.form.get("model", "openai/gpt-5.2")
+    model = request.form.get("model", "openai/gpt-5.4")
     api_key = request.form.get("api_key", "")
     base_url = request.form.get("base_url", "")
     reasoning = request.form.get("reasoning", "true") == "true"
@@ -1023,7 +1023,7 @@ body {
     </div>
     <div class="form-group">
       <label>Model</label>
-      <input type="text" id="settModel" placeholder="openai/gpt-5.2">
+      <input type="text" id="settModel" placeholder="gpt-5.4">
     </div>
     <div class="form-group">
       <label>Max Iterations</label>
@@ -1059,7 +1059,7 @@ function loadSettings() {
   return {
     apiKey: localStorage.getItem('vlm_api_key') || '',
     baseUrl: localStorage.getItem('vlm_base_url') || '',
-    model: localStorage.getItem('vlm_model') || 'openai/gpt-5.2',
+    model: localStorage.getItem('vlm_model') || 'gpt-5.4',
     maxIter: parseInt(localStorage.getItem('vlm_max_iter') || '30'),
     reasoning: localStorage.getItem('vlm_reasoning') !== 'false',
   };

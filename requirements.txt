@@ -1,5 +1,6 @@
 # Core agent dependencies
 openai
+python-dotenv
 jupyter_client
 docker
 
