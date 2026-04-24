@@ -13,3 +13,6 @@ Pillow
 
 # Evaluation utilities
 regex
+
+#others
+dotenv

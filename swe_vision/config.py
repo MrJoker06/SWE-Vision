@@ -6,10 +6,7 @@ import datetime
 import logging
 import os
 
-try:
-    from dotenv import load_dotenv
-except ImportError:  # Optional at runtime; install via requirements.txt
-    load_dotenv = None
+from dotenv import load_dotenv
 
 # ─────────────────────────────────────────────────────────────────────
 # Logging
@@ -23,8 +20,8 @@ logger = logging.getLogger("vlm_agent")
 # Load .env from project root so direct Python/IDE runs also get env vars.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DOTENV_PATH = os.path.join(_PROJECT_ROOT, ".env")
-if load_dotenv is not None:
-    load_dotenv(_DOTENV_PATH, override=False)
+
+load_dotenv(_DOTENV_PATH, override=False)
 
 # ─────────────────────────────────────────────────────────────────────
 # Constants

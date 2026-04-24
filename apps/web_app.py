@@ -57,6 +57,9 @@ SESSION_BASE = os.path.join(
     "vlm_web_sessions",
 )
 os.makedirs(SESSION_BASE, exist_ok=True)
+DEFAULT_WEB_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+DEFAULT_WEB_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
+DEFAULT_WEB_MAX_ITERATIONS = int(os.environ.get("VLM_MAX_ITERATIONS", "30"))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -181,10 +184,10 @@ def run_agent_thread(event_queue, session_id, prompt, image_paths, config):
     agent = WebVLMAgent(
         event_queue=event_queue,
         session_id=session_id,
-        model=config.get("model", "gpt-5.4"),
+        model=config.get("model", DEFAULT_WEB_MODEL),
         api_key=config.get("api_key") or None,
         base_url=config.get("base_url") or None,
-        max_iterations=config.get("max_iterations", 30),
+        max_iterations=config.get("max_iterations", DEFAULT_WEB_MAX_ITERATIONS),
         verbose=True,
         reasoning=config.get("reasoning", True),
     )
@@ -214,6 +217,9 @@ def index():
         HTML_TEMPLATE,
         agent_available=AGENT_AVAILABLE,
         agent_error=AGENT_IMPORT_ERROR,
+        default_model=DEFAULT_WEB_MODEL,
+        default_base_url=DEFAULT_WEB_BASE_URL,
+        default_max_iterations=DEFAULT_WEB_MAX_ITERATIONS,
     )
 
 
@@ -226,11 +232,11 @@ def api_chat():
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
 
-    model = request.form.get("model", "openai/gpt-5.4")
-    api_key = request.form.get("api_key", "")
-    base_url = request.form.get("base_url", "")
+    model = request.form.get("model", "").strip() or DEFAULT_WEB_MODEL
+    api_key = request.form.get("api_key", "").strip() or os.environ.get("OPENAI_API_KEY", "")
+    base_url = request.form.get("base_url", "").strip() or DEFAULT_WEB_BASE_URL
     reasoning = request.form.get("reasoning", "true") == "true"
-    max_iterations = int(request.form.get("max_iterations", "30"))
+    max_iterations = int(request.form.get("max_iterations", str(DEFAULT_WEB_MAX_ITERATIONS)))
 
     session_id = uuid.uuid4().hex[:12]
     upload_dir = os.path.join(SESSION_BASE, session_id, "uploads")
@@ -1058,9 +1064,9 @@ let currentEventSource = null;
 function loadSettings() {
   return {
     apiKey: localStorage.getItem('vlm_api_key') || '',
-    baseUrl: localStorage.getItem('vlm_base_url') || '',
-    model: localStorage.getItem('vlm_model') || 'gpt-5.4',
-    maxIter: parseInt(localStorage.getItem('vlm_max_iter') || '30'),
+    baseUrl: localStorage.getItem('vlm_base_url') || {{ default_base_url|tojson }},
+    model: localStorage.getItem('vlm_model') || {{ default_model|tojson }},
+    maxIter: parseInt(localStorage.getItem('vlm_max_iter') || {{ default_max_iterations|tojson }}),
     reasoning: localStorage.getItem('vlm_reasoning') !== 'false',
   };
 }

@@ -112,6 +112,8 @@ class VLMToolCallAgent:
                 if not os.path.exists(img_path):
                     self._log("Warning: image not found: %s", img_path, level="warning")
                     continue
+                # 将图片转换成字节码传输给model(包含大于20MB的压缩操作)
+                # 但是容器拿到的图片是挂载过去的原图(/mnt/data/...)
                 content.append(make_image_content_part(img_path))
                 dest_name = None
                 if has_collision or len(image_paths) > 1:
