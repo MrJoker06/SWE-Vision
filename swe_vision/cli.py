@@ -17,7 +17,7 @@ import asyncio
 import sys
 
 from swe_vision.agent import VLMToolCallAgent
-from swe_vision.config import DEFAULT_MODEL, MAX_ITERATIONS
+from swe_vision.config import DEFAULT_MAX_HISTORY, DEFAULT_MODEL, MAX_ITERATIONS
 
 
 async def async_main():
@@ -102,6 +102,20 @@ Examples:
         default=True,
         help="Enable reasoning mode (default: True). Use --no-reasoning to disable.",
     )
+    parser.add_argument(
+        "--max-history",
+        type=int,
+        default=DEFAULT_MAX_HISTORY,
+        help=(
+            f"Max message count before summarization in interactive mode "
+            f"(default: {DEFAULT_MAX_HISTORY}, 0=unlimited history)"
+        ),
+    )
+    parser.add_argument(
+        "--summary-model",
+        default=None,
+        help="Model for generating conversation summaries (default: same as --model)",
+    )
 
     args = parser.parse_args()
 
@@ -116,6 +130,8 @@ Examples:
         verbose=args.verbose,
         save_trajectory=args.save_trajectory,
         reasoning=args.reasoning,
+        max_history=args.max_history,
+        summary_model=args.summary_model,
     )
 
     try:

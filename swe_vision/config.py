@@ -28,8 +28,25 @@ load_dotenv(_DOTENV_PATH, override=False)
 # ─────────────────────────────────────────────────────────────────────
 DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 MAX_ITERATIONS = 100
+DEFAULT_MAX_HISTORY = 5
 CELL_TIMEOUT = 120.0
 MAX_OUTPUT_CHARS = 50000
+
+# ─────────────────────────────────────────────────────────────────────
+# Prompts
+# ─────────────────────────────────────────────────────────────────────
+SUMMARY_SYSTEM_PROMPT = """\
+You are a conversation summarizer for an AI coding assistant session.
+Summarize the following conversation into a concise summary that captures:
+1. User's questions and intent
+2. Code that was executed and key results
+3. Important variables/data currently in the Jupyter kernel
+4. Key findings, decisions, or errors encountered
+
+If a previous summary is provided, incorporate its information into the new summary.
+Keep the summary concise but comprehensive enough to continue the conversation without losing critical context.
+Respond with the summary only, no preamble.\
+"""
 
 # Container-side working directory (visible to the kernel)
 CONTAINER_WORK_DIR = "/mnt/data"

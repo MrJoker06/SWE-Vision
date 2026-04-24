@@ -17,8 +17,10 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 from swe_vision.config import (
+    DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
     MAX_ITERATIONS,
+    SUMMARY_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     TOOLS,
     logger,
@@ -46,12 +48,16 @@ class VLMToolCallAgent:
         verbose: bool = True,
         save_trajectory: Optional[str] = None,
         reasoning: bool = True,
+        max_history: int = DEFAULT_MAX_HISTORY,
+        summary_model: Optional[str] = None,
     ):
         self.model = model
         self.max_iterations = max_iterations
         self.system_prompt = system_prompt
         self.verbose = verbose
         self.reasoning = reasoning
+        self.max_history = max_history
+        self.summary_model = summary_model
 
         self._save_trajectory_dir = save_trajectory
 
@@ -133,10 +139,137 @@ class VLMToolCallAgent:
 
         return {"role": "user", "content": content}
 
+    # ── Interactive memory / summary helpers ───────────────────────
+
+    def _count_history_messages(self) -> int:
+        """Count messages excluding system prompt and summary."""
+        return sum(
+            1 for m in self.messages
+            if m.get("role") != "system" and not m.get("_is_summary")
+        )
+
+    def _extract_existing_summary(self) -> Optional[str]:
+        """Extract the text content of the existing summary message, if any."""
+        for msg in self.messages:
+            if msg.get("_is_summary"):
+                content = msg.get("content", "")
+                # Strip the prefix marker
+                prefix = "[Conversation Summary]\n"
+                if content.startswith(prefix):
+                    return content[len(prefix):]
+                return content
+        return None
+
+    def _get_history_messages(self) -> List[Dict[str, Any]]:
+        """Return all non-system, non-summary messages."""
+        return [
+            m for m in self.messages
+            if m.get("role") != "system" and not m.get("_is_summary")
+        ]
+
+    @staticmethod
+    def _strip_images_from_content(content) -> str:
+        """Replace image content parts with text placeholders."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "image_url":
+                        parts.append("[Image]")
+                    elif item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    else:
+                        parts.append(str(item))
+                else:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        return str(content)
+
+    def _format_messages_for_summary(
+        self, messages: List[Dict[str, Any]],
+    ) -> str:
+        """Format a list of messages into a readable text block for the summary LLM."""
+        lines = []
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            content = self._strip_images_from_content(msg.get("content", ""))
+            # Truncate very long tool outputs to keep summary request manageable
+            if role == "TOOL" and len(content) > 2000:
+                content = content[:2000] + "\n... [truncated]"
+            lines.append(f"[{role}] {content}")
+        return "\n\n".join(lines)
+
+    async def _maybe_summarize(self):
+        """
+        Check if history exceeds max_history; if so, summarize and compact.
+
+        After summarization, self.messages becomes:
+            [system_prompt, summary_message]
+        """
+        if self.max_history <= 0:
+            return
+        if self._count_history_messages() < self.max_history:
+            return
+
+        self._log("History reached %d messages, triggering summarization...",
+                   self._count_history_messages())
+
+        # 1. Extract old summary (if any)
+        old_summary = self._extract_existing_summary()
+
+        # 2. Build summary input
+        history_msgs = self._get_history_messages()
+        formatted = self._format_messages_for_summary(history_msgs)
+
+        summary_input = ""
+        if old_summary:
+            summary_input += f"Previous summary:\n{old_summary}\n\n"
+        summary_input += f"Conversation to summarize:\n{formatted}"
+
+        # 3. Call LLM to generate summary
+        model = self.summary_model or self.model
+        self._log("Generating summary with model: %s", model)
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                    {"role": "user", "content": summary_input},
+                ],
+            )
+            new_summary = response.choices[0].message.content
+        except Exception as e:
+            self._log("Summary generation failed: %s. Keeping history as-is.", e,
+                       level="warning")
+            return
+
+        # 4. Rebuild messages: [system] + [summary]
+        self.messages = [
+            self.messages[0],  # system prompt
+            {
+                "role": "user",
+                "content": f"[Conversation Summary]\n{new_summary}",
+                "_is_summary": True,
+            },
+        ]
+        self._log("Summarization complete. History compacted.")
+
     def _call_llm(self) -> Any:
+        # Strip internal metadata fields (e.g. _is_summary) before sending
+        # to the API — OpenAI rejects unknown keys.
+        clean_messages = []
+        for msg in self.messages:
+            if msg.get("_is_summary"):
+                clean = {k: v for k, v in msg.items() if k != "_is_summary"}
+                clean_messages.append(clean)
+            else:
+                clean_messages.append(msg)
+
         kwargs = dict(
             model=self.model,
-            messages=self.messages,
+            messages=clean_messages,
             tools=TOOLS,
             tool_choice="auto",
         )
@@ -375,13 +508,27 @@ class VLMToolCallAgent:
     async def run_interactive(self, image_paths: Optional[List[str]] = None):
         """
         Run in interactive mode — the user can keep asking questions
-        and the kernel state is preserved.
+        and both the kernel state and conversation history are preserved.
+
+        When the message count (excluding system prompt and summary)
+        reaches ``max_history``, the history is compressed into a single
+        summary message before the next user turn.
         """
         print("\n" + "="*60)
         print("VLM Tool Call Agent - Interactive Mode (Docker Runtime)")
+        print(f"  Memory: last {self.max_history} messages kept"
+              if self.max_history > 0 else "  Memory: unlimited history")
+        if self.summary_model:
+            print(f"  Summary model: {self.summary_model}")
         print("Type 'quit' or 'exit' to stop.")
         print("Type 'image:<path>' to add an image to the next query.")
         print("="*60 + "\n")
+
+        # Session-level state: messages persist across turns
+        self.messages = [
+            {"role": "system", "content": self.system_prompt},
+        ]
+        self.trajectory = self._init_trajectory("interactive_session", image_paths)
 
         session_images = list(image_paths or [])
 
@@ -407,10 +554,36 @@ class VLMToolCallAgent:
                     print(f"  Image not found: {img_path}")
                 continue
 
-            answer = await self.run(user_input, session_images if session_images else None)
+            # Summarize if history has grown too large
+            await self._maybe_summarize()
+
+            # Build and append user message (without resetting messages)
+            user_msg = self._build_user_message(
+                user_input, session_images if session_images else None,
+            )
+            self.messages.append(user_msg)
+            self.trajectory.record_user_step(user_input, session_images or None)
+
+            if self.verbose:
+                print(f"\n{'='*60}")
+                print(f"User Query: {user_input}")
+                if session_images:
+                    print(f"Images: {session_images}")
+                hist_count = self._count_history_messages()
+                print(f"History: {hist_count} messages"
+                      + (" (has summary)" if self._extract_existing_summary() else ""))
+                print(f"{'='*60}\n")
+
+            # Run the agentic loop (appends to self.messages in-place)
+            answer = await self._run_loop()
             print(f"\nAnswer: {answer}\n")
 
             session_images = []
+
+        # Save trajectory on exit
+        if self.trajectory:
+            self.trajectory.save()
+            self.trajectory.save_messages_raw(self.messages)
 
     async def cleanup(self):
         """Shut down the Docker kernel and clean up resources."""
