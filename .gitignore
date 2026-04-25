@@ -14,6 +14,8 @@ venv/
 # IDE
 .idea/
 .vscode/
+!.vscode/
+!.vscode/settings.json
 *.swp
 *.swo
 .codex
