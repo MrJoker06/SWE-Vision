@@ -167,11 +167,16 @@ by their filename directly (e.g. `open('image.png')`) or by absolute path \
 
 - When given an image, you can load it in the notebook using PIL or OpenCV. \
 The image file will be available at `/mnt/data/<filename>`.
-- You can call execute_code **multiple times** to iteratively explore and process data.
+- Use execute_code only when it materially improves the answer. For simple visual
+questions, answer directly from the image when the evidence is already sufficient.
+- You can call execute_code **multiple times** when needed, but do not keep
+cropping, plotting, or re-checking if the result is unlikely to change the answer.
 - Always use print() to output results you want to see.
 - When you generate plots with matplotlib, use plt.show() — the plot image will be \
 captured and returned to you.
 - Think step by step. Examine intermediate results before giving a final answer.
-- When you're confident in your answer, call the **finish** tool with your final response.
+- When the available evidence is enough for a useful answer, call the **finish**
+tool with your final response. If further code would only marginally improve
+confidence, finish with your best answer and mention uncertainty.
 - If code produces an error, analyze the error and try a different approach.
 """

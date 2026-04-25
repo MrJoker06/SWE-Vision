@@ -304,6 +304,24 @@ class VLMToolCallAgent:
             "base64_images": result["images"],
         }
 
+    @staticmethod
+    def _is_low_yield_code_result(text_output: str, image_count: int) -> bool:
+        """Treat image-only tool results as low-yield visualization loops."""
+        if image_count <= 0:
+            return False
+        text = (text_output or "").strip()
+        return not text or text in {"<Figure size 640x480 with 1 Axes>"}
+
+    @staticmethod
+    def _make_low_yield_stop_message() -> str:
+        return (
+            "Low-yield code exploration detected: recent code executions have "
+            "mostly produced more visualizations without new textual evidence. "
+            "Do not call execute_code again for this question. Use the image and "
+            "the evidence already gathered, then call finish with your best answer. "
+            "Mention uncertainty if the count or interpretation is approximate."
+        )
+
     def _init_trajectory(self, query: str, image_paths: Optional[List[str]]) -> TrajectoryRecorder:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         if self._save_trajectory_dir:
@@ -362,20 +380,30 @@ class VLMToolCallAgent:
 
     async def _run_loop(self) -> str:
         """Core agentic loop."""
+        consecutive_low_yield_code = 0
+        low_yield_stop_sent = False
+
         for iteration in range(1, self.max_iterations + 1):
             if self.verbose:
                 print(f"\n--- Iteration {iteration}/{self.max_iterations} ---")
 
             MAX_RETRIES = 10
+            last_error = None
             for retry in range(MAX_RETRIES):
                 try:
                     response = self._call_llm()
                     break
-                except Exception as e:
-                    self._log("OpenAI API error: %s, retry %d/%d", str(e), retry, MAX_RETRIES, level="error")
-
-            if retry == MAX_RETRIES - 1:
-                return f"[Error] Failed to call LLM: {e}"
+                except Exception as err:
+                    last_error = err
+                    self._log(
+                        "OpenAI API error: %s, retry %d/%d",
+                        str(err),
+                        retry,
+                        MAX_RETRIES,
+                        level="error",
+                    )
+            else:
+                return f"[Error] Failed to call LLM: {last_error}"
 
             choice = response.choices[0]
             message = choice.message
@@ -417,6 +445,7 @@ class VLMToolCallAgent:
                     return message.content or "[No response]"
                 continue
 
+            finish_answer: Optional[str] = None
             for tool_call in message.tool_calls:
                 fn_name = tool_call.function.name
                 try:
@@ -439,14 +468,40 @@ class VLMToolCallAgent:
 
                 if fn_name == "finish":
                     answer = fn_args.get("answer", "")
-                    if self.verbose:
-                        print(f"\n{'='*60}")
-                        print(f"[FINISH] Final Answer:")
-                        print(answer)
-                        print(f"{'='*60}\n")
-                    return answer
+                    # Even for logical "finish", we must append a tool response
+                    # so every tool_call_id is properly closed in message history.
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": "[finish acknowledged]",
+                    })
+                    self.trajectory.record_tool_step(
+                        tool_call_id=tool_call.id,
+                        tool_name=fn_name,
+                        code=None,
+                        text_output="[finish acknowledged]",
+                    )
+                    finish_answer = answer
+                    continue
 
                 elif fn_name == "execute_code":
+                    if low_yield_stop_sent:
+                        text_output = self._make_low_yield_stop_message()
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": text_output,
+                        })
+                        self.trajectory.record_tool_step(
+                            tool_call_id=tool_call.id,
+                            tool_name=fn_name,
+                            code=fn_args.get("code", ""),
+                            text_output=text_output,
+                        )
+                        if self.verbose:
+                            print(f"\n[Code Output] {text_output[:500]}")
+                        continue
+
                     code = fn_args.get("code", "")
                     text_output = ""
                     image_parts: List[Dict[str, Any]] = []
@@ -482,6 +537,14 @@ class VLMToolCallAgent:
                         base64_images=base64_images,
                     )
 
+                    if self._is_low_yield_code_result(text_output, len(image_parts)):
+                        consecutive_low_yield_code += 1
+                    else:
+                        consecutive_low_yield_code = 0
+
+                    if consecutive_low_yield_code >= 3:
+                        low_yield_stop_sent = True
+
                     if self.verbose:
                         print(f"\n[Code Output] {text_output[:500]}")
                         if image_parts:
@@ -501,6 +564,14 @@ class VLMToolCallAgent:
                         code=None,
                         text_output=err_text,
                     )
+
+            if finish_answer is not None:
+                if self.verbose:
+                    print(f"\n{'='*60}")
+                    print(f"[FINISH] Final Answer:")
+                    print(finish_answer)
+                    print(f"{'='*60}\n")
+                return finish_answer
 
         self._log("Max iterations reached (%d)", self.max_iterations, level="warning")
         return "[Error] Max iterations reached without a final answer."
