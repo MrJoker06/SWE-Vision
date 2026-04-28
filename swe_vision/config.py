@@ -27,7 +27,8 @@ load_dotenv(_DOTENV_PATH, override=False)
 # Constants
 # ─────────────────────────────────────────────────────────────────────
 DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
-MAX_ITERATIONS = 100
+MAX_ITERATIONS = 20
+DEFAULT_MAX_CODE_EXECUTIONS = 5
 DEFAULT_MAX_HISTORY = 5
 CELL_TIMEOUT = 120.0
 MAX_OUTPUT_CHARS = 50000

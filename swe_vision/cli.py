@@ -17,7 +17,12 @@ import asyncio
 import sys
 
 from swe_vision.agent import VLMToolCallAgent
-from swe_vision.config import DEFAULT_MAX_HISTORY, DEFAULT_MODEL, MAX_ITERATIONS
+from swe_vision.config import (
+    DEFAULT_MAX_CODE_EXECUTIONS,
+    DEFAULT_MAX_HISTORY,
+    DEFAULT_MODEL,
+    MAX_ITERATIONS,
+)
 
 
 async def async_main():
@@ -81,6 +86,15 @@ Examples:
         help=f"Max agentic loop iterations (default: {MAX_ITERATIONS})",
     )
     parser.add_argument(
+        "--max-code-executions",
+        type=int,
+        default=DEFAULT_MAX_CODE_EXECUTIONS,
+        help=(
+            f"Max successful execute_code calls per query "
+            f"(default: {DEFAULT_MAX_CODE_EXECUTIONS}, 0=unlimited)"
+        ),
+    )
+    parser.add_argument(
         "--save-trajectory",
         default=None,
         help="Directory to save trajectory (default: auto-generated under ./trajectories/)",
@@ -136,6 +150,7 @@ Examples:
         api_key=args.api_key,
         base_url=args.base_url,
         max_iterations=args.max_iterations,
+        max_code_executions=args.max_code_executions,
         verbose=args.verbose,
         save_trajectory=args.save_trajectory,
         reasoning=args.reasoning,

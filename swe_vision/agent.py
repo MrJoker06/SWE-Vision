@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 from swe_vision.config import (
+    DEFAULT_MAX_CODE_EXECUTIONS,
     DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
     MAX_ITERATIONS,
@@ -45,6 +46,7 @@ class VLMToolCallAgent:
         base_url: Optional[str] = None,
         system_prompt: str = SYSTEM_PROMPT,
         max_iterations: int = MAX_ITERATIONS,
+        max_code_executions: int = DEFAULT_MAX_CODE_EXECUTIONS,
         verbose: bool = True,
         save_trajectory: Optional[str] = None,
         reasoning: bool = True,
@@ -54,8 +56,9 @@ class VLMToolCallAgent:
     ):
         self.model = model
         self.max_iterations = max_iterations
+        self.max_code_executions = max_code_executions
         self.model_has_vision = model_has_vision
-        self.system_prompt = self._with_vision_guidance(system_prompt)
+        self.system_prompt = self._with_runtime_guidance(system_prompt)
         self.verbose = verbose
         self.reasoning = reasoning
         self.max_history = max_history
@@ -80,6 +83,10 @@ class VLMToolCallAgent:
         print(f"Using API key: {'set' if effective_api_key else 'None'}")
         print(f"Using base URL: {effective_base_url or 'OpenAI default'}")
         print(f"Model vision support: {self.model_has_vision}")
+        print(
+            "Max successful code executions: "
+            f"{self.max_code_executions if self.max_code_executions > 0 else 'unlimited'}"
+        )
 
         self.kernel: Optional[JupyterNotebookKernel] = None
         self.file_manager = NotebookFileManager()
@@ -88,7 +95,7 @@ class VLMToolCallAgent:
 
         self.trajectory: Optional[TrajectoryRecorder] = None
 
-    def _with_vision_guidance(self, system_prompt: str) -> str:
+    def _with_runtime_guidance(self, system_prompt: str) -> str:
         if self.model_has_vision:
             guidance = """
 
@@ -109,7 +116,23 @@ image inputs directly. When an image is provided, use execute_code to open and
 inspect the file paths under /mnt/data/. Do not say you cannot access the image
 just because you cannot inspect image_url content directly.
 """
-        return system_prompt.rstrip() + guidance
+        budget_guidance = f"""
+
+## Code Execution Budget
+
+You have a budget of {self._format_code_execution_budget()} successful
+execute_code calls for this query. Only successful code executions consume this
+budget; failed executions do not. Plan code calls carefully: each call should
+reduce a specific uncertainty or produce evidence needed for the final answer.
+If the budget is exhausted, stop requesting execute_code and call finish with
+the best answer supported by the evidence already gathered.
+"""
+        return system_prompt.rstrip() + guidance + budget_guidance
+
+    def _format_code_execution_budget(self) -> str:
+        if self.max_code_executions <= 0:
+            return "unlimited"
+        return str(self.max_code_executions)
 
     async def _ensure_kernel(self):
         if self.kernel is None:
@@ -326,6 +349,7 @@ just because you cannot inspect image_url content directly.
             image_parts.append(make_base64_image_content_part(img_b64))
 
         return {
+            "status": result["status"],
             "text_output": text,
             "image_parts": image_parts,
             "base64_images": result["images"],
@@ -349,6 +373,23 @@ just because you cannot inspect image_url content directly.
             "Mention uncertainty if the count or interpretation is approximate."
         )
 
+    def _make_code_budget_exhausted_message(self) -> str:
+        return (
+            "Successful execute_code budget exhausted. Do not call execute_code "
+            "again for this question. Use the image, conversation, and evidence "
+            "already gathered, then call finish with your best answer. Mention "
+            "uncertainty if the answer is approximate."
+        )
+
+    def _make_code_budget_remaining_note(self, successful_code_executions: int) -> str:
+        if self.max_code_executions <= 0:
+            return "\n\n[Code execution budget: unlimited]"
+        remaining = max(self.max_code_executions - successful_code_executions, 0)
+        return (
+            "\n\n[Successful execute_code budget remaining: "
+            f"{remaining}/{self.max_code_executions}]"
+        )
+
     def _init_trajectory(self, query: str, image_paths: Optional[List[str]]) -> TrajectoryRecorder:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         if self._save_trajectory_dir:
@@ -362,6 +403,7 @@ just because you cannot inspect image_url content directly.
             query=query,
             image_paths=image_paths or [],
             max_iterations=self.max_iterations,
+            max_code_executions=self.max_code_executions,
             system_prompt=self.system_prompt,
             model_has_vision=self.model_has_vision,
         )
@@ -410,6 +452,7 @@ just because you cannot inspect image_url content directly.
         """Core agentic loop."""
         consecutive_low_yield_code = 0
         low_yield_stop_sent = False
+        successful_code_executions = 0
 
         for iteration in range(1, self.max_iterations + 1):
             if self.verbose:
@@ -513,6 +556,26 @@ just because you cannot inspect image_url content directly.
                     continue
 
                 elif fn_name == "execute_code":
+                    if (
+                        self.max_code_executions > 0
+                        and successful_code_executions >= self.max_code_executions
+                    ):
+                        text_output = self._make_code_budget_exhausted_message()
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": text_output,
+                        })
+                        self.trajectory.record_tool_step(
+                            tool_call_id=tool_call.id,
+                            tool_name=fn_name,
+                            code=fn_args.get("code", ""),
+                            text_output=text_output,
+                        )
+                        if self.verbose:
+                            print(f"\n[Code Output] {text_output[:500]}")
+                        continue
+
                     if low_yield_stop_sent:
                         text_output = self._make_low_yield_stop_message()
                         self.messages.append({
@@ -536,9 +599,15 @@ just because you cannot inspect image_url content directly.
                     base64_images: List[str] = []
                     try:
                         exec_result = await self._handle_execute_code(code)
+                        execution_succeeded = exec_result["status"] == "ok"
                         text_output = exec_result["text_output"]
                         image_parts = exec_result["image_parts"]
                         base64_images = exec_result["base64_images"]
+                        if execution_succeeded:
+                            successful_code_executions += 1
+                        text_output += self._make_code_budget_remaining_note(
+                            successful_code_executions
+                        )
                     except Exception as e:
                         tb = traceback.format_exc()
                         self._log("Code execution failed: %s", e, level="error")
