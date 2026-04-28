@@ -50,10 +50,12 @@ class VLMToolCallAgent:
         reasoning: bool = True,
         max_history: int = DEFAULT_MAX_HISTORY,
         summary_model: Optional[str] = None,
+        model_has_vision: bool = True,
     ):
         self.model = model
         self.max_iterations = max_iterations
-        self.system_prompt = system_prompt
+        self.model_has_vision = model_has_vision
+        self.system_prompt = self._with_vision_guidance(system_prompt)
         self.verbose = verbose
         self.reasoning = reasoning
         self.max_history = max_history
@@ -77,6 +79,7 @@ class VLMToolCallAgent:
         print(f"Using model: {self.model}")
         print(f"Using API key: {'set' if effective_api_key else 'None'}")
         print(f"Using base URL: {effective_base_url or 'OpenAI default'}")
+        print(f"Model vision support: {self.model_has_vision}")
 
         self.kernel: Optional[JupyterNotebookKernel] = None
         self.file_manager = NotebookFileManager()
@@ -84,6 +87,29 @@ class VLMToolCallAgent:
         self.messages: List[Dict[str, Any]] = []
 
         self.trajectory: Optional[TrajectoryRecorder] = None
+
+    def _with_vision_guidance(self, system_prompt: str) -> str:
+        if self.model_has_vision:
+            guidance = """
+
+## Model Vision Capability
+
+The selected model can directly inspect image inputs. For simple visual
+questions, use the image content directly and call finish when the answer is
+clear. Use execute_code only to resolve a specific uncertainty, perform
+measurement/OCR, or make the answer materially more reliable.
+"""
+        else:
+            guidance = """
+
+## Model Vision Capability
+
+The selected model should be treated as text-only and may not be able to inspect
+image inputs directly. When an image is provided, use execute_code to open and
+inspect the file paths under /mnt/data/. Do not say you cannot access the image
+just because you cannot inspect image_url content directly.
+"""
+        return system_prompt.rstrip() + guidance
 
     async def _ensure_kernel(self):
         if self.kernel is None:
@@ -118,10 +144,11 @@ class VLMToolCallAgent:
                 if not os.path.exists(img_path):
                     self._log("Warning: image not found: %s", img_path, level="warning")
                     continue
+                if self.model_has_vision:
+                    content.append(make_image_content_part(img_path))
+                dest_name = None
                 # 将图片转换成字节码传输给model(包含大于20MB的压缩操作)
                 # 但是容器拿到的图片是挂载过去的原图(/mnt/data/...)
-                content.append(make_image_content_part(img_path))
-                dest_name = None
                 if has_collision or len(image_paths) > 1:
                     base = os.path.basename(img_path)
                     name, ext = os.path.splitext(base)
@@ -336,6 +363,7 @@ class VLMToolCallAgent:
             image_paths=image_paths or [],
             max_iterations=self.max_iterations,
             system_prompt=self.system_prompt,
+            model_has_vision=self.model_has_vision,
         )
         return recorder
 

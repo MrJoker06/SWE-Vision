@@ -116,6 +116,15 @@ Examples:
         default=None,
         help="Model for generating conversation summaries (default: same as --model)",
     )
+    parser.add_argument(
+        "--model-has-vision",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Whether the selected model can directly inspect image inputs. "
+            "Default: True. Use --no-model-has-vision for text-only models."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -132,6 +141,7 @@ Examples:
         reasoning=args.reasoning,
         max_history=args.max_history,
         summary_model=args.summary_model,
+        model_has_vision=args.model_has_vision,
     )
 
     try:
