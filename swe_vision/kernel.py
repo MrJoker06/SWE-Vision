@@ -9,6 +9,7 @@ with pre-assigned ZMQ ports. The host connects via jupyter_client.
 import asyncio
 import json
 import os
+import posixpath
 import queue
 import re
 import shutil
@@ -117,7 +118,7 @@ class JupyterNotebookKernel:
         with open(host_path, "w") as f:
             json.dump(conn, f)
         logger.info("Wrote kernel connection file to %s", host_path)
-        return os.path.join(self._container_work_dir, ".kernel_connection.json")
+        return posixpath.join(self._container_work_dir, ".kernel_connection.json")
 
     def _start_container(self):
         import docker

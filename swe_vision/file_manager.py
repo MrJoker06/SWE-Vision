@@ -6,6 +6,7 @@ become accessible at /mnt/data inside the container.
 """
 
 import os
+import posixpath
 import shutil
 from dataclasses import dataclass
 from typing import Optional
@@ -54,9 +55,9 @@ class NotebookFileManager:
         if os.path.abspath(src_path) != os.path.abspath(host_dest):
             shutil.copy2(src_path, host_dest)
             logger.info("Copied %s -> %s (container: %s)", src_path, host_dest,
-                        os.path.join(self.container_work_dir, dest_name))
-        return os.path.join(self.container_work_dir, dest_name)
+                        posixpath.join(self.container_work_dir, dest_name))
+        return posixpath.join(self.container_work_dir, dest_name)
 
     def get_kernel_path(self, filename: str) -> str:
         """Return the full path a file would have inside the container."""
-        return os.path.join(self.container_work_dir, filename)
+        return posixpath.join(self.container_work_dir, filename)

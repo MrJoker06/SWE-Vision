@@ -12,13 +12,20 @@ import datetime
 import json
 import os
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from openai import OpenAI
 
 from swe_vision.config import (
+    DEFAULT_MAX_CODE_EXECUTIONS,
+    DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    DEFAULT_REASONING_EFFORT,
+    DEFAULT_REASONING_EXCLUDE,
+    DEFAULT_REASONING_MAX_TOKENS,
     MAX_ITERATIONS,
+    SUMMARY_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     TOOLS,
     logger,
@@ -26,6 +33,7 @@ from swe_vision.config import (
 from swe_vision.file_manager import NotebookFileManager
 from swe_vision.image_utils import make_base64_image_content_part, make_image_content_part
 from swe_vision.kernel import JupyterNotebookKernel
+from swe_vision.providers import ReasoningConfig, get_adapter, resolve_endpoint
 from swe_vision.trajectory import TrajectoryRecorder
 
 
@@ -43,34 +51,71 @@ class VLMToolCallAgent:
         base_url: Optional[str] = None,
         system_prompt: str = SYSTEM_PROMPT,
         max_iterations: int = MAX_ITERATIONS,
+        max_code_executions: int = DEFAULT_MAX_CODE_EXECUTIONS,
         verbose: bool = True,
         save_trajectory: Optional[str] = None,
         reasoning: bool = True,
+        reasoning_effort: Optional[str] = None,
+        reasoning_max_tokens: Optional[int] = None,
+        reasoning_exclude: Optional[bool] = None,
+        provider: str = DEFAULT_PROVIDER,
+        max_history: int = DEFAULT_MAX_HISTORY,
+        summary_model: Optional[str] = None,
+        model_has_vision: bool = True,
     ):
         self.model = model
         self.max_iterations = max_iterations
-        self.system_prompt = system_prompt
+        self.max_code_executions = max_code_executions
         self.verbose = verbose
-        self.reasoning = reasoning
+        self.provider = provider
+        self.max_history = max_history
+        self.summary_model = summary_model
 
         self._save_trajectory_dir = save_trajectory
 
+        effective_api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        effective_base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+        self.base_url = effective_base_url
+        self.endpoint = resolve_endpoint(
+            model=self.model,
+            base_url=self.base_url,
+            provider=self.provider,
+        )
+        self.model_has_vision = self._resolve_model_has_vision(model_has_vision)
+        self.system_prompt = self._with_runtime_guidance(system_prompt)
         client_kwargs = {}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        if base_url:
-            client_kwargs["base_url"] = base_url
-        elif os.environ.get("OPENAI_BASE_URL"):
-            client_kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
+        if effective_api_key:
+            client_kwargs["api_key"] = effective_api_key
+        if effective_base_url:
+            client_kwargs["base_url"] = effective_base_url
 
         self.client = OpenAI(**client_kwargs)
-
-        effective_api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        effective_base_url = base_url or client_kwargs.get("base_url")
+        env_max_tokens = _parse_optional_int(DEFAULT_REASONING_MAX_TOKENS)
+        self.reasoning_config = ReasoningConfig.from_legacy(
+            reasoning=reasoning,
+            effort=reasoning_effort or DEFAULT_REASONING_EFFORT,
+            max_tokens=(
+                reasoning_max_tokens
+                if reasoning_max_tokens is not None
+                else env_max_tokens
+            ),
+            exclude=(
+                reasoning_exclude
+                if reasoning_exclude is not None
+                else DEFAULT_REASONING_EXCLUDE
+            ),
+        )
 
         print(f"Using model: {self.model}")
         print(f"Using API key: {'set' if effective_api_key else 'None'}")
         print(f"Using base URL: {effective_base_url or 'OpenAI default'}")
+        print(f"Using provider: {self.endpoint.provider}")
+        print(f"Using reasoning effort: {self.reasoning_config.effort}")
+        print(f"Model vision support: {self.model_has_vision}")
+        print(
+            "Max successful code executions: "
+            f"{self.max_code_executions if self.max_code_executions > 0 else 'unlimited'}"
+        )
 
         self.kernel: Optional[JupyterNotebookKernel] = None
         self.file_manager = NotebookFileManager()
@@ -78,6 +123,61 @@ class VLMToolCallAgent:
         self.messages: List[Dict[str, Any]] = []
 
         self.trajectory: Optional[TrajectoryRecorder] = None
+
+    def _resolve_model_has_vision(self, requested: bool) -> bool:
+        provider_capability = self.endpoint.capabilities.supports_vision
+        if provider_capability is False and requested:
+            self._log(
+                "Provider '%s' does not advertise vision support for model '%s'; "
+                "image inputs will be routed through the notebook instead of "
+                "being sent as image_url content.",
+                self.endpoint.provider,
+                self.model,
+                level="warning",
+            )
+            return False
+        if provider_capability is True:
+            return True
+        return requested
+
+    def _with_runtime_guidance(self, system_prompt: str) -> str:
+        if self.model_has_vision:
+            guidance = """
+
+## Model Vision Capability
+
+The selected model can directly inspect image inputs. For simple visual
+questions, use the image content directly and call finish when the answer is
+clear. Use execute_code only to resolve a specific uncertainty, perform
+measurement/OCR, or make the answer materially more reliable.
+"""
+        else:
+            guidance = """
+
+## Model Vision Capability
+
+The selected model should be treated as text-only and may not be able to inspect
+image inputs directly. When an image is provided, use execute_code to open and
+inspect the file paths under /mnt/data/. Do not say you cannot access the image
+just because you cannot inspect image_url content directly.
+"""
+        budget_guidance = f"""
+
+## Code Execution Budget
+
+You have a budget of {self._format_code_execution_budget()} successful
+execute_code calls for this query. Only successful code executions consume this
+budget; failed executions do not. Plan code calls carefully: each call should
+reduce a specific uncertainty or produce evidence needed for the final answer.
+If the budget is exhausted, stop requesting execute_code and call finish with
+the best answer supported by the evidence already gathered.
+"""
+        return system_prompt.rstrip() + guidance + budget_guidance
+
+    def _format_code_execution_budget(self) -> str:
+        if self.max_code_executions <= 0:
+            return "unlimited"
+        return str(self.max_code_executions)
 
     async def _ensure_kernel(self):
         if self.kernel is None:
@@ -112,10 +212,11 @@ class VLMToolCallAgent:
                 if not os.path.exists(img_path):
                     self._log("Warning: image not found: %s", img_path, level="warning")
                     continue
+                if self.model_has_vision:
+                    content.append(make_image_content_part(img_path))
+                dest_name = None
                 # 将图片转换成字节码传输给model(包含大于20MB的压缩操作)
                 # 但是容器拿到的图片是挂载过去的原图(/mnt/data/...)
-                content.append(make_image_content_part(img_path))
-                dest_name = None
                 if has_collision or len(image_paths) > 1:
                     base = os.path.basename(img_path)
                     name, ext = os.path.splitext(base)
@@ -133,24 +234,155 @@ class VLMToolCallAgent:
 
         return {"role": "user", "content": content}
 
+    # ── Interactive memory / summary helpers ───────────────────────
+
+    def _count_history_messages(self) -> int:
+        """Count messages excluding system prompt and summary."""
+        return sum(
+            1 for m in self.messages
+            if m.get("role") != "system" and not m.get("_is_summary")
+        )
+
+    def _extract_existing_summary(self) -> Optional[str]:
+        """Extract the text content of the existing summary message, if any."""
+        for msg in self.messages:
+            if msg.get("_is_summary"):
+                content = msg.get("content", "")
+                # Strip the prefix marker
+                prefix = "[Conversation Summary]\n"
+                if content.startswith(prefix):
+                    return content[len(prefix):]
+                return content
+        return None
+
+    def _get_history_messages(self) -> List[Dict[str, Any]]:
+        """Return all non-system, non-summary messages."""
+        return [
+            m for m in self.messages
+            if m.get("role") != "system" and not m.get("_is_summary")
+        ]
+
+    @staticmethod
+    def _strip_images_from_content(content) -> str:
+        """Replace image content parts with text placeholders."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "image_url":
+                        parts.append("[Image]")
+                    elif item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    else:
+                        parts.append(str(item))
+                else:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        return str(content)
+
+    def _format_messages_for_summary(
+        self, messages: List[Dict[str, Any]],
+    ) -> str:
+        """Format a list of messages into a readable text block for the summary LLM."""
+        lines = []
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            content = self._strip_images_from_content(msg.get("content", ""))
+            # Truncate very long tool outputs to keep summary request manageable
+            if role == "TOOL" and len(content) > 2000:
+                content = content[:2000] + "\n... [truncated]"
+            lines.append(f"[{role}] {content}")
+        return "\n\n".join(lines)
+
+    async def _maybe_summarize(self):
+        """
+        Check if history exceeds max_history; if so, summarize and compact.
+
+        After summarization, self.messages becomes:
+            [system_prompt, summary_message]
+        """
+        if self.max_history <= 0:
+            return
+        if self._count_history_messages() < self.max_history:
+            return
+
+        self._log("History reached %d messages, triggering summarization...",
+                   self._count_history_messages())
+
+        # 1. Extract old summary (if any)
+        old_summary = self._extract_existing_summary()
+
+        # 2. Build summary input
+        history_msgs = self._get_history_messages()
+        formatted = self._format_messages_for_summary(history_msgs)
+
+        summary_input = ""
+        if old_summary:
+            summary_input += f"Previous summary:\n{old_summary}\n\n"
+        summary_input += f"Conversation to summarize:\n{formatted}"
+
+        # 3. Call LLM to generate summary
+        model = self.summary_model or self.model
+        self._log("Generating summary with model: %s", model)
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                    {"role": "user", "content": summary_input},
+                ],
+            )
+            new_summary = response.choices[0].message.content
+        except Exception as e:
+            self._log("Summary generation failed: %s. Keeping history as-is.", e,
+                       level="warning")
+            return
+
+        # 4. Rebuild messages: [system] + [summary]
+        self.messages = [
+            self.messages[0],  # system prompt
+            {
+                "role": "user",
+                "content": f"[Conversation Summary]\n{new_summary}",
+                "_is_summary": True,
+            },
+        ]
+        self._log("Summarization complete. History compacted.")
+
     def _call_llm(self) -> Any:
-        kwargs = dict(
+        # Strip internal metadata fields (e.g. _is_summary) before sending
+        # to the API — OpenAI rejects unknown keys.
+        clean_messages: List[Dict[str, Any]] = []
+        for msg in self.messages:
+            if msg.get("_is_summary"):
+                clean = {k: v for k, v in msg.items() if k != "_is_summary"}
+                clean_messages.append(clean)
+            else:
+                clean_messages.append(msg)
+
+        kwargs: Dict[str, Any] = dict(
             model=self.model,
-            messages=self.messages,
+            messages=clean_messages,
             tools=TOOLS,
             tool_choice="auto",
         )
-        if self.reasoning:
-            # kwargs["extra_body"] = {"reasoning": {"enabled": True, 'effort': 'xhigh'}}
-            kwargs["reasoning_effort"] = 'xhigh'
-        else:
-            kwargs["extra_body"] = {"reasoning": {"enabled": False, 'effort': 'minimal'}}
+        warnings = get_adapter(self.endpoint.provider).apply_reasoning(
+            kwargs,
+            self.endpoint,
+            self.reasoning_config,
+        )
+        for warning in warnings:
+            self._log(warning, level="warning")
 
-        response = self.client.chat.completions.create(**kwargs)
+        create_completion = cast(Any, self.client.chat.completions.create)
+        response = create_completion(**kwargs)
         return response
 
     async def _handle_execute_code(self, code: str) -> Dict[str, Any]:
         await self._ensure_kernel()
+        assert self.kernel is not None
 
         self._log("Executing code in Docker Jupyter notebook:\n%s",
                    code[:200] + ("..." if len(code) > 200 else ""))
@@ -166,10 +398,46 @@ class VLMToolCallAgent:
             image_parts.append(make_base64_image_content_part(img_b64))
 
         return {
+            "status": result["status"],
             "text_output": text,
             "image_parts": image_parts,
             "base64_images": result["images"],
         }
+
+    @staticmethod
+    def _is_low_yield_code_result(text_output: str, image_count: int) -> bool:
+        """Treat image-only tool results as low-yield visualization loops."""
+        if image_count <= 0:
+            return False
+        text = (text_output or "").strip()
+        return not text or text in {"<Figure size 640x480 with 1 Axes>"}
+
+    @staticmethod
+    def _make_low_yield_stop_message() -> str:
+        return (
+            "Low-yield code exploration detected: recent code executions have "
+            "mostly produced more visualizations without new textual evidence. "
+            "Do not call execute_code again for this question. Use the image and "
+            "the evidence already gathered, then call finish with your best answer. "
+            "Mention uncertainty if the count or interpretation is approximate."
+        )
+
+    def _make_code_budget_exhausted_message(self) -> str:
+        return (
+            "Successful execute_code budget exhausted. Do not call execute_code "
+            "again for this question. Use the image, conversation, and evidence "
+            "already gathered, then call finish with your best answer. Mention "
+            "uncertainty if the answer is approximate."
+        )
+
+    def _make_code_budget_remaining_note(self, successful_code_executions: int) -> str:
+        if self.max_code_executions <= 0:
+            return "\n\n[Code execution budget: unlimited]"
+        remaining = max(self.max_code_executions - successful_code_executions, 0)
+        return (
+            "\n\n[Successful execute_code budget remaining: "
+            f"{remaining}/{self.max_code_executions}]"
+        )
 
     def _init_trajectory(self, query: str, image_paths: Optional[List[str]]) -> TrajectoryRecorder:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -184,7 +452,16 @@ class VLMToolCallAgent:
             query=query,
             image_paths=image_paths or [],
             max_iterations=self.max_iterations,
+            max_code_executions=self.max_code_executions,
             system_prompt=self.system_prompt,
+            model_has_vision=self.model_has_vision,
+            provider=self.endpoint.provider,
+            protocol=self.endpoint.protocol,
+            model_vendor=self.endpoint.model_vendor,
+            reasoning_effort=self.reasoning_config.effort,
+            reasoning_max_tokens=self.reasoning_config.max_tokens,
+            reasoning_exclude=self.reasoning_config.exclude,
+            reasoning_style=self.endpoint.capabilities.reasoning_style,
         )
         return recorder
 
@@ -199,6 +476,7 @@ class VLMToolCallAgent:
         Returns the final answer string.
         """
         self.trajectory = self._init_trajectory(query, image_paths)
+        trajectory = self.trajectory
 
         self.messages = [
             {"role": "system", "content": self.system_prompt},
@@ -207,7 +485,7 @@ class VLMToolCallAgent:
         user_msg = self._build_user_message(query, image_paths)
         self.messages.append(user_msg)
 
-        self.trajectory.record_user_step(query, image_paths)
+        trajectory.record_user_step(query, image_paths)
 
         if self.verbose:
             print(f"\n{'='*60}")
@@ -221,46 +499,74 @@ class VLMToolCallAgent:
             final_answer = await self._run_loop()
         finally:
             if final_answer is not None:
-                self.trajectory.record_finish(final_answer)
-            self.trajectory.save()
-            self.trajectory.save_messages_raw(self.messages)
+                trajectory.record_finish(final_answer)
+            trajectory.save()
+            trajectory.save_messages_raw(self.messages)
 
+        assert final_answer is not None
         return final_answer
 
     async def _run_loop(self) -> str:
         """Core agentic loop."""
+        assert self.trajectory is not None
+        consecutive_low_yield_code = 0
+        low_yield_stop_sent = False
+        successful_code_executions = 0
+
         for iteration in range(1, self.max_iterations + 1):
             if self.verbose:
                 print(f"\n--- Iteration {iteration}/{self.max_iterations} ---")
 
             MAX_RETRIES = 10
+            last_error = None
             for retry in range(MAX_RETRIES):
                 try:
                     response = self._call_llm()
                     break
-                except Exception as e:
-                    self._log("OpenAI API error: %s, retry %d/%d", str(e), retry, MAX_RETRIES, level="error")
-
-            if retry == MAX_RETRIES - 1:
-                return f"[Error] Failed to call LLM: {e}"
+                except Exception as err:
+                    last_error = err
+                    self._log(
+                        "OpenAI API error: %s, retry %d/%d",
+                        str(err),
+                        retry,
+                        MAX_RETRIES,
+                        level="error",
+                    )
+            else:
+                return f"[Error] Failed to call LLM: {last_error}"
 
             choice = response.choices[0]
             message = choice.message
+            message_content = (
+                message.content if isinstance(message.content, str) else ""
+            )
 
             if hasattr(message, "to_dict"):
                 assistant_msg = message.to_dict()
             elif hasattr(message, "model_dump"):
                 assistant_msg = message.model_dump()
             else:
-                assistant_msg = {"role": "assistant", "content": message.content}
+                assistant_msg = {"role": "assistant", "content": message_content}
             assistant_msg.setdefault("role", "assistant")
             self.messages.append(assistant_msg)
 
-            tool_call_dicts = assistant_msg.get("tool_calls")
-            reasoning_details = assistant_msg.get("reasoning_details")
+            raw_tool_calls = assistant_msg.get("tool_calls")
+            tool_call_dicts = (
+                raw_tool_calls
+                if isinstance(raw_tool_calls, list)
+                else None
+            )
+            raw_reasoning_details = assistant_msg.get("reasoning_details")
+            reasoning_details = (
+                raw_reasoning_details
+                if isinstance(raw_reasoning_details, str)
+                else None
+            )
 
             self.trajectory.record_assistant_step(
-                message.content, tool_call_dicts, reasoning_details=reasoning_details,
+                message_content or None,
+                tool_call_dicts,
+                reasoning_details=reasoning_details,
             )
 
             try:
@@ -274,16 +580,17 @@ class VLMToolCallAgent:
                 except Exception:
                     pass
 
-            if message.content:
+            if message_content:
                 if self.verbose:
-                    print(f"\n[Assistant] {message.content[:500]}")
+                    print(f"\n[Assistant] {message_content[:500]}")
 
             if not message.tool_calls:
                 if choice.finish_reason == "stop":
                     self._log("Model stopped without calling finish tool.")
-                    return message.content or "[No response]"
+                    return message_content or "[No response]"
                 continue
 
+            finish_answer: Optional[str] = None
             for tool_call in message.tool_calls:
                 fn_name = tool_call.function.name
                 try:
@@ -306,32 +613,93 @@ class VLMToolCallAgent:
 
                 if fn_name == "finish":
                     answer = fn_args.get("answer", "")
-                    if self.verbose:
-                        print(f"\n{'='*60}")
-                        print(f"[FINISH] Final Answer:")
-                        print(answer)
-                        print(f"{'='*60}\n")
-                    return answer
+                    # Even for logical "finish", we must append a tool response
+                    # so every tool_call_id is properly closed in message history.
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": "[finish acknowledged]",
+                    })
+                    self.trajectory.record_tool_step(
+                        tool_call_id=tool_call.id,
+                        tool_name=fn_name,
+                        code=None,
+                        text_output="[finish acknowledged]",
+                    )
+                    finish_answer = answer
+                    continue
 
                 elif fn_name == "execute_code":
+                    if (
+                        self.max_code_executions > 0
+                        and successful_code_executions >= self.max_code_executions
+                    ):
+                        text_output = self._make_code_budget_exhausted_message()
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": text_output,
+                        })
+                        self.trajectory.record_tool_step(
+                            tool_call_id=tool_call.id,
+                            tool_name=fn_name,
+                            code=fn_args.get("code", ""),
+                            text_output=text_output,
+                        )
+                        if self.verbose:
+                            print(f"\n[Code Output] {text_output[:500]}")
+                        continue
+
+                    if low_yield_stop_sent:
+                        text_output = self._make_low_yield_stop_message()
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": text_output,
+                        })
+                        self.trajectory.record_tool_step(
+                            tool_call_id=tool_call.id,
+                            tool_name=fn_name,
+                            code=fn_args.get("code", ""),
+                            text_output=text_output,
+                        )
+                        if self.verbose:
+                            print(f"\n[Code Output] {text_output[:500]}")
+                        continue
+
                     code = fn_args.get("code", "")
                     text_output = ""
                     image_parts: List[Dict[str, Any]] = []
                     base64_images: List[str] = []
                     try:
                         exec_result = await self._handle_execute_code(code)
+                        execution_succeeded = exec_result["status"] == "ok"
                         text_output = exec_result["text_output"]
                         image_parts = exec_result["image_parts"]
                         base64_images = exec_result["base64_images"]
+                        if execution_succeeded:
+                            successful_code_executions += 1
+                        text_output += self._make_code_budget_remaining_note(
+                            successful_code_executions
+                        )
                     except Exception as e:
                         tb = traceback.format_exc()
                         self._log("Code execution failed: %s", e, level="error")
                         text_output = f"[Execution Error] {e}\n{tb}"
 
-                    if image_parts:
+                    if image_parts and self.model_has_vision:
                         tool_content: Any = [
                             {"type": "text", "text": text_output},
                         ] + image_parts
+                    elif image_parts:
+                        tool_content = (
+                            text_output
+                            + "\n\n[Tool generated image output, but this provider "
+                            "does not accept image message content. Use the "
+                            "textual observations above or execute more Python code "
+                            "against the files in /mnt/data if more visual evidence "
+                            "is needed.]"
+                        )
                     else:
                         tool_content = text_output
 
@@ -348,6 +716,14 @@ class VLMToolCallAgent:
                         text_output=text_output,
                         base64_images=base64_images,
                     )
+
+                    if self._is_low_yield_code_result(text_output, len(image_parts)):
+                        consecutive_low_yield_code += 1
+                    else:
+                        consecutive_low_yield_code = 0
+
+                    if consecutive_low_yield_code >= 3:
+                        low_yield_stop_sent = True
 
                     if self.verbose:
                         print(f"\n[Code Output] {text_output[:500]}")
@@ -369,19 +745,41 @@ class VLMToolCallAgent:
                         text_output=err_text,
                     )
 
+            if finish_answer is not None:
+                if self.verbose:
+                    print(f"\n{'='*60}")
+                    print(f"[FINISH] Final Answer:")
+                    print(finish_answer)
+                    print(f"{'='*60}\n")
+                return finish_answer
+
         self._log("Max iterations reached (%d)", self.max_iterations, level="warning")
         return "[Error] Max iterations reached without a final answer."
 
     async def run_interactive(self, image_paths: Optional[List[str]] = None):
         """
         Run in interactive mode — the user can keep asking questions
-        and the kernel state is preserved.
+        and both the kernel state and conversation history are preserved.
+
+        When the message count (excluding system prompt and summary)
+        reaches ``max_history``, the history is compressed into a single
+        summary message before the next user turn.
         """
         print("\n" + "="*60)
         print("VLM Tool Call Agent - Interactive Mode (Docker Runtime)")
+        print(f"  Memory: last {self.max_history} messages kept"
+              if self.max_history > 0 else "  Memory: unlimited history")
+        if self.summary_model:
+            print(f"  Summary model: {self.summary_model}")
         print("Type 'quit' or 'exit' to stop.")
         print("Type 'image:<path>' to add an image to the next query.")
         print("="*60 + "\n")
+
+        # Session-level state: messages persist across turns
+        self.messages = [
+            {"role": "system", "content": self.system_prompt},
+        ]
+        self.trajectory = self._init_trajectory("interactive_session", image_paths)
 
         session_images = list(image_paths or [])
 
@@ -407,12 +805,45 @@ class VLMToolCallAgent:
                     print(f"  Image not found: {img_path}")
                 continue
 
-            answer = await self.run(user_input, session_images if session_images else None)
+            # Summarize if history has grown too large
+            await self._maybe_summarize()
+
+            # Build and append user message (without resetting messages)
+            user_msg = self._build_user_message(
+                user_input, session_images if session_images else None,
+            )
+            self.messages.append(user_msg)
+            self.trajectory.record_user_step(user_input, session_images or None)
+
+            if self.verbose:
+                print(f"\n{'='*60}")
+                print(f"User Query: {user_input}")
+                if session_images:
+                    print(f"Images: {session_images}")
+                hist_count = self._count_history_messages()
+                print(f"History: {hist_count} messages"
+                      + (" (has summary)" if self._extract_existing_summary() else ""))
+                print(f"{'='*60}\n")
+
+            # Run the agentic loop (appends to self.messages in-place)
+            answer = await self._run_loop()
             print(f"\nAnswer: {answer}\n")
 
             session_images = []
+
+        # Save trajectory on exit
+        if self.trajectory:
+            self.trajectory.save()
+            self.trajectory.save_messages_raw(self.messages)
 
     async def cleanup(self):
         """Shut down the Docker kernel and clean up resources."""
         if self.kernel:
             await self.kernel.shutdown()
+
+
+def _parse_optional_int(value: str) -> Optional[int]:
+    value = (value or "").strip()
+    if not value:
+        return None
+    return int(value)

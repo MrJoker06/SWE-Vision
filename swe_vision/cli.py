@@ -17,7 +17,15 @@ import asyncio
 import sys
 
 from swe_vision.agent import VLMToolCallAgent
-from swe_vision.config import DEFAULT_MODEL, MAX_ITERATIONS
+from swe_vision.config import (
+    DEFAULT_MAX_CODE_EXECUTIONS,
+    DEFAULT_MAX_HISTORY,
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    DEFAULT_REASONING_EFFORT,
+    MAX_ITERATIONS,
+)
+from swe_vision.providers import REASONING_EFFORTS
 
 
 async def async_main():
@@ -81,6 +89,15 @@ Examples:
         help=f"Max agentic loop iterations (default: {MAX_ITERATIONS})",
     )
     parser.add_argument(
+        "--max-code-executions",
+        type=int,
+        default=DEFAULT_MAX_CODE_EXECUTIONS,
+        help=(
+            f"Max successful execute_code calls per query "
+            f"(default: {DEFAULT_MAX_CODE_EXECUTIONS}, 0=unlimited)"
+        ),
+    )
+    parser.add_argument(
         "--save-trajectory",
         default=None,
         help="Directory to save trajectory (default: auto-generated under ./trajectories/)",
@@ -102,6 +119,58 @@ Examples:
         default=True,
         help="Enable reasoning mode (default: True). Use --no-reasoning to disable.",
     )
+    parser.add_argument(
+        "--provider",
+        default=DEFAULT_PROVIDER,
+        help=(
+            "Model provider adapter: auto, openai, openrouter, deepseek, "
+            "dashscope, qwen, minimax, or unknown "
+            f"(default: {DEFAULT_PROVIDER})"
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=REASONING_EFFORTS,
+        default=DEFAULT_REASONING_EFFORT,
+        help=(
+            "Provider-neutral reasoning effort "
+            f"(default: {DEFAULT_REASONING_EFFORT})"
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-max-tokens",
+        type=int,
+        default=None,
+        help="Optional provider-neutral reasoning token budget.",
+    )
+    parser.add_argument(
+        "--reasoning-exclude",
+        action="store_true",
+        help="Ask compatible providers to hide returned reasoning tokens.",
+    )
+    parser.add_argument(
+        "--max-history",
+        type=int,
+        default=DEFAULT_MAX_HISTORY,
+        help=(
+            f"Max message count before summarization in interactive mode "
+            f"(default: {DEFAULT_MAX_HISTORY}, 0=unlimited history)"
+        ),
+    )
+    parser.add_argument(
+        "--summary-model",
+        default=None,
+        help="Model for generating conversation summaries (default: same as --model)",
+    )
+    parser.add_argument(
+        "--model-has-vision",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Whether the selected model can directly inspect image inputs. "
+            "Default: True. Use --no-model-has-vision for text-only models."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -113,9 +182,17 @@ Examples:
         api_key=args.api_key,
         base_url=args.base_url,
         max_iterations=args.max_iterations,
+        max_code_executions=args.max_code_executions,
         verbose=args.verbose,
         save_trajectory=args.save_trajectory,
         reasoning=args.reasoning,
+        reasoning_effort=args.reasoning_effort,
+        reasoning_max_tokens=args.reasoning_max_tokens,
+        reasoning_exclude=args.reasoning_exclude,
+        provider=args.provider,
+        max_history=args.max_history,
+        summary_model=args.summary_model,
+        model_has_vision=args.model_has_vision,
     )
 
     try:
