@@ -12,7 +12,7 @@ import datetime
 import json
 import os
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from openai import OpenAI
 
@@ -354,7 +354,7 @@ the best answer supported by the evidence already gathered.
     def _call_llm(self) -> Any:
         # Strip internal metadata fields (e.g. _is_summary) before sending
         # to the API — OpenAI rejects unknown keys.
-        clean_messages = []
+        clean_messages: List[Dict[str, Any]] = []
         for msg in self.messages:
             if msg.get("_is_summary"):
                 clean = {k: v for k, v in msg.items() if k != "_is_summary"}
@@ -362,7 +362,7 @@ the best answer supported by the evidence already gathered.
             else:
                 clean_messages.append(msg)
 
-        kwargs = dict(
+        kwargs: Dict[str, Any] = dict(
             model=self.model,
             messages=clean_messages,
             tools=TOOLS,
@@ -376,11 +376,13 @@ the best answer supported by the evidence already gathered.
         for warning in warnings:
             self._log(warning, level="warning")
 
-        response = self.client.chat.completions.create(**kwargs)
+        create_completion = cast(Any, self.client.chat.completions.create)
+        response = create_completion(**kwargs)
         return response
 
     async def _handle_execute_code(self, code: str) -> Dict[str, Any]:
         await self._ensure_kernel()
+        assert self.kernel is not None
 
         self._log("Executing code in Docker Jupyter notebook:\n%s",
                    code[:200] + ("..." if len(code) > 200 else ""))
@@ -474,6 +476,7 @@ the best answer supported by the evidence already gathered.
         Returns the final answer string.
         """
         self.trajectory = self._init_trajectory(query, image_paths)
+        trajectory = self.trajectory
 
         self.messages = [
             {"role": "system", "content": self.system_prompt},
@@ -482,7 +485,7 @@ the best answer supported by the evidence already gathered.
         user_msg = self._build_user_message(query, image_paths)
         self.messages.append(user_msg)
 
-        self.trajectory.record_user_step(query, image_paths)
+        trajectory.record_user_step(query, image_paths)
 
         if self.verbose:
             print(f"\n{'='*60}")
@@ -496,14 +499,16 @@ the best answer supported by the evidence already gathered.
             final_answer = await self._run_loop()
         finally:
             if final_answer is not None:
-                self.trajectory.record_finish(final_answer)
-            self.trajectory.save()
-            self.trajectory.save_messages_raw(self.messages)
+                trajectory.record_finish(final_answer)
+            trajectory.save()
+            trajectory.save_messages_raw(self.messages)
 
+        assert final_answer is not None
         return final_answer
 
     async def _run_loop(self) -> str:
         """Core agentic loop."""
+        assert self.trajectory is not None
         consecutive_low_yield_code = 0
         low_yield_stop_sent = False
         successful_code_executions = 0
@@ -532,21 +537,36 @@ the best answer supported by the evidence already gathered.
 
             choice = response.choices[0]
             message = choice.message
+            message_content = (
+                message.content if isinstance(message.content, str) else ""
+            )
 
             if hasattr(message, "to_dict"):
                 assistant_msg = message.to_dict()
             elif hasattr(message, "model_dump"):
                 assistant_msg = message.model_dump()
             else:
-                assistant_msg = {"role": "assistant", "content": message.content}
+                assistant_msg = {"role": "assistant", "content": message_content}
             assistant_msg.setdefault("role", "assistant")
             self.messages.append(assistant_msg)
 
-            tool_call_dicts = assistant_msg.get("tool_calls")
-            reasoning_details = assistant_msg.get("reasoning_details")
+            raw_tool_calls = assistant_msg.get("tool_calls")
+            tool_call_dicts = (
+                raw_tool_calls
+                if isinstance(raw_tool_calls, list)
+                else None
+            )
+            raw_reasoning_details = assistant_msg.get("reasoning_details")
+            reasoning_details = (
+                raw_reasoning_details
+                if isinstance(raw_reasoning_details, str)
+                else None
+            )
 
             self.trajectory.record_assistant_step(
-                message.content, tool_call_dicts, reasoning_details=reasoning_details,
+                message_content or None,
+                tool_call_dicts,
+                reasoning_details=reasoning_details,
             )
 
             try:
@@ -560,14 +580,14 @@ the best answer supported by the evidence already gathered.
                 except Exception:
                     pass
 
-            if message.content:
+            if message_content:
                 if self.verbose:
-                    print(f"\n[Assistant] {message.content[:500]}")
+                    print(f"\n[Assistant] {message_content[:500]}")
 
             if not message.tool_calls:
                 if choice.finish_reason == "stop":
                     self._log("Model stopped without calling finish tool.")
-                    return message.content or "[No response]"
+                    return message_content or "[No response]"
                 continue
 
             finish_answer: Optional[str] = None
