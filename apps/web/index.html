@@ -66,26 +66,49 @@
     <div class="form-group">
       <label>API Key</label>
       <input type="password" id="settApiKey" placeholder="sk-...">
-      <div class="hint">OpenAI-compatible API key. Stored in browser only.</div>
+      <div class="hint">Required. Stored in this browser only.</div>
     </div>
     <div class="form-group">
       <label>Base URL</label>
       <input type="text" id="settBaseUrl" placeholder="https://api.openai.com/v1">
-      <div class="hint">Leave empty for default. Supports OpenRouter, local endpoints, etc.</div>
+      <div class="hint">Required. Provider presets can fill this field.</div>
+    </div>
+    <div class="form-group">
+      <label>Provider</label>
+      <select id="settProvider">
+        <option value="auto">Auto</option>
+        <option value="openai">OpenAI</option>
+        <option value="openrouter">OpenRouter</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="dashscope">DashScope / Qwen</option>
+        <option value="minimax">MiniMax</option>
+        <option value="unknown">Unknown</option>
+      </select>
     </div>
     <div class="form-group">
       <label>Model</label>
       <input type="text" id="settModel" placeholder="gpt-5.4">
     </div>
     <div class="form-group">
-      <label>Max Iterations</label>
-      <input type="number" id="settMaxIter" value="30" min="1" max="100">
+      <label>Reasoning Effort</label>
+      <select id="settReasoningEffort">
+        <option value="auto">Auto</option>
+        <option value="off">Off</option>
+        <option value="minimal">Minimal</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="max">Max</option>
+      </select>
+      <div class="hint">Mapped per provider. Unsupported models ignore incompatible settings.</div>
     </div>
     <div class="form-group">
-      <div class="toggle-row">
-        <label>Enable Reasoning</label>
-        <div class="toggle on" id="settReasoning" onclick="this.classList.toggle('on')"></div>
-      </div>
+      <label>Reasoning Budget</label>
+      <input type="number" id="settReasoningMaxTokens" min="1" placeholder="Optional token budget">
+    </div>
+    <div class="form-group">
+      <label>Max Iterations</label>
+      <input type="number" id="settMaxIter" value="30" min="1" max="100">
     </div>
   </div>
 </div>

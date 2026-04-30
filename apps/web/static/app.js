@@ -2,9 +2,8 @@
 let defaultConfig = {
   agent_available: true,
   agent_error: '',
-  default_model: 'gpt-4o',
-  default_base_url: '',
   default_max_iterations: 30,
+  provider_presets: {},
 };
 let uploadedFiles = [];
 let isProcessing = false;
@@ -19,9 +18,12 @@ async function loadServerConfig() {
     const modelInput = document.getElementById('settModel');
     const baseUrlInput = document.getElementById('settBaseUrl');
     const maxIterInput = document.getElementById('settMaxIter');
-    if (modelInput) modelInput.placeholder = defaultConfig.default_model || 'gpt-4o';
-    if (baseUrlInput) baseUrlInput.placeholder = defaultConfig.default_base_url || 'https://api.openai.com/v1';
+    const providerInput = document.getElementById('settProvider');
+    const effortInput = document.getElementById('settReasoningEffort');
     if (maxIterInput) maxIterInput.value = localStorage.getItem('vlm_max_iter') || defaultConfig.default_max_iterations || 30;
+    if (providerInput) providerInput.value = localStorage.getItem('vlm_provider') || 'openai';
+    if (effortInput) effortInput.value = localStorage.getItem('vlm_reasoning_effort') || 'auto';
+    applyProviderPreset(false);
     updateCurrentModel();
     if (!defaultConfig.agent_available) {
       const container = createAssistantMessage();
@@ -37,13 +39,104 @@ async function loadServerConfig() {
 
 // --- Settings ---
 function loadSettings() {
+  const provider = localStorage.getItem('vlm_provider') || 'openai';
+  const reasoningEffort = normalizeReasoningEffort(
+    provider,
+    localStorage.getItem('vlm_reasoning_effort') || 'auto'
+  );
   return {
     apiKey: localStorage.getItem('vlm_api_key') || '',
-    baseUrl: localStorage.getItem('vlm_base_url') || defaultConfig.default_base_url || '',
-    model: localStorage.getItem('vlm_model') || defaultConfig.default_model || 'gpt-4o',
+    baseUrl: localStorage.getItem('vlm_base_url') || '',
+    provider,
+    model: localStorage.getItem('vlm_model') || '',
     maxIter: parseInt(localStorage.getItem('vlm_max_iter') || defaultConfig.default_max_iterations || 30),
-    reasoning: localStorage.getItem('vlm_reasoning') !== 'false',
+    reasoningEffort,
+    reasoningMaxTokens: localStorage.getItem('vlm_reasoning_max_tokens') || '',
   };
+}
+
+const FALLBACK_PROVIDER_PRESETS = {
+  openai: {base_url: 'https://api.openai.com/v1', default_model: 'gpt-5.1', reasoning_efforts: ['auto', 'off', 'low', 'medium', 'high']},
+  openrouter: {base_url: 'https://openrouter.ai/api/v1', default_model: 'openai/gpt-5.1', reasoning_efforts: ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'max']},
+  deepseek: {base_url: 'https://api.deepseek.com', default_model: 'deepseek-v4-pro', reasoning_efforts: ['auto', 'off', 'high', 'max']},
+  dashscope: {base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', default_model: 'qwen3.6-plus', reasoning_efforts: ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'max']},
+  minimax: {base_url: 'https://api.minimax.io/v1', default_model: 'MiniMax-M2.7', reasoning_efforts: ['auto', 'off']},
+};
+const REASONING_LABELS = {
+  auto: 'Auto',
+  off: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  max: 'Max',
+};
+
+function getProviderPreset(provider) {
+  return (defaultConfig.provider_presets || {})[provider] || FALLBACK_PROVIDER_PRESETS[provider] || null;
+}
+
+function getReasoningEfforts(preset) {
+  return (preset && preset.reasoning_efforts) || ['auto', 'off'];
+}
+
+function normalizeReasoningEffort(provider, effort) {
+  const efforts = getReasoningEfforts(getProviderPreset(provider));
+  if (efforts.includes(effort)) return effort;
+  return efforts.includes('auto') ? 'auto' : efforts[0];
+}
+
+function isPresetBaseUrl(value) {
+  const normalized = (value || '').trim().replace(/\/$/, '');
+  if (!normalized) return true;
+  return Object.values(FALLBACK_PROVIDER_PRESETS).some(p => p.base_url.replace(/\/$/, '') === normalized)
+    || Object.values(defaultConfig.provider_presets || {}).some(p => (p.base_url || '').replace(/\/$/, '') === normalized);
+}
+
+function isPresetModel(value) {
+  const normalized = (value || '').trim();
+  if (!normalized) return true;
+  return Object.values(FALLBACK_PROVIDER_PRESETS).some(p => p.default_model === normalized)
+    || Object.values(defaultConfig.provider_presets || {}).some(p => p.default_model === normalized);
+}
+
+function applyProviderPreset(overwrite = false) {
+  const providerInput = document.getElementById('settProvider');
+  const baseUrlInput = document.getElementById('settBaseUrl');
+  const modelInput = document.getElementById('settModel');
+  const effortInput = document.getElementById('settReasoningEffort');
+  if (!providerInput || !baseUrlInput || !modelInput) return;
+
+  const preset = getProviderPreset(providerInput.value);
+  updateReasoningEffortOptions(preset, effortInput);
+  if (!preset) return;
+
+  baseUrlInput.placeholder = preset.base_url;
+  modelInput.placeholder = preset.default_model;
+
+  if (overwrite || isPresetBaseUrl(baseUrlInput.value)) {
+    baseUrlInput.value = preset.base_url;
+  }
+  if (overwrite || isPresetModel(modelInput.value)) {
+    modelInput.value = preset.default_model;
+  }
+}
+
+function updateReasoningEffortOptions(preset, effortInput) {
+  if (!effortInput) return;
+  const previous = effortInput.value || localStorage.getItem('vlm_reasoning_effort') || 'auto';
+  const efforts = getReasoningEfforts(preset);
+  effortInput.innerHTML = '';
+  for (const effort of efforts) {
+    const option = document.createElement('option');
+    option.value = effort;
+    option.textContent = REASONING_LABELS[effort] || effort;
+    effortInput.append(option);
+  }
+  effortInput.value = efforts.includes(previous) ? previous : (efforts.includes('auto') ? 'auto' : efforts[0]);
+  if (effortInput.value !== previous) {
+    localStorage.setItem('vlm_reasoning_effort', effortInput.value);
+  }
 }
 
 function updateCurrentModel() {
@@ -58,25 +151,36 @@ function updateCurrentModel() {
 function saveSettings() {
   localStorage.setItem('vlm_api_key', document.getElementById('settApiKey').value);
   localStorage.setItem('vlm_base_url', document.getElementById('settBaseUrl').value);
+  localStorage.setItem('vlm_provider', document.getElementById('settProvider').value);
   localStorage.setItem('vlm_model', document.getElementById('settModel').value);
   localStorage.setItem('vlm_max_iter', document.getElementById('settMaxIter').value);
-  localStorage.setItem('vlm_reasoning', document.getElementById('settReasoning').classList.contains('on'));
+  localStorage.setItem('vlm_reasoning_effort', document.getElementById('settReasoningEffort').value);
+  localStorage.setItem('vlm_reasoning_max_tokens', document.getElementById('settReasoningMaxTokens').value);
   updateCurrentModel();
 }
 function openSettings() {
   const s = loadSettings();
   document.getElementById('settApiKey').value = s.apiKey;
   document.getElementById('settBaseUrl').value = s.baseUrl;
+  document.getElementById('settProvider').value = s.provider;
   document.getElementById('settModel').value = s.model;
   document.getElementById('settMaxIter').value = s.maxIter;
-  const tog = document.getElementById('settReasoning');
-  tog.classList.toggle('on', s.reasoning);
+  applyProviderPreset(false);
+  document.getElementById('settReasoningEffort').value = s.reasoningEffort;
+  updateReasoningEffortOptions(getProviderPreset(s.provider), document.getElementById('settReasoningEffort'));
+  document.getElementById('settReasoningMaxTokens').value = s.reasoningMaxTokens;
   document.getElementById('settingsOverlay').classList.add('open');
 }
 function closeSettings() {
   saveSettings();
   document.getElementById('settingsOverlay').classList.remove('open');
 }
+
+document.addEventListener('change', e => {
+  if (e.target && e.target.id === 'settProvider') {
+    applyProviderPreset(true);
+  }
+});
 
 // --- UI Helpers ---
 function scrollToBottom() {
@@ -361,10 +465,16 @@ async function sendMessage() {
   const prompt = input.value.trim();
   if (!prompt || isProcessing) return;
 
+  const settings = loadSettings();
+  if (!settings.apiKey || !settings.baseUrl || !settings.model) {
+    openSettings();
+    alert('Please enter API Key, Base URL, and Model in Settings before sending.');
+    return;
+  }
+
   isProcessing = true;
   document.getElementById('sendBtn').disabled = true;
 
-  const settings = loadSettings();
   const filesToSend = [...uploadedFiles];
 
   addUserMessage(prompt, filesToSend);
@@ -382,7 +492,10 @@ async function sendMessage() {
   formData.append('model', settings.model);
   formData.append('api_key', settings.apiKey);
   formData.append('base_url', settings.baseUrl);
-  formData.append('reasoning', settings.reasoning);
+  formData.append('provider', settings.provider);
+  formData.append('reasoning', settings.reasoningEffort !== 'off');
+  formData.append('reasoning_effort', settings.reasoningEffort);
+  formData.append('reasoning_max_tokens', settings.reasoningMaxTokens);
   formData.append('max_iterations', settings.maxIter);
   for (const f of filesToSend) formData.append('images', f);
 

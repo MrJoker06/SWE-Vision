@@ -58,9 +58,34 @@ SESSION_BASE = os.path.join(
 )
 os.makedirs(SESSION_BASE, exist_ok=True)
 FRONTEND_DIR = Path(__file__).resolve().parent / "web"
-DEFAULT_WEB_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
-DEFAULT_WEB_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
 DEFAULT_WEB_MAX_ITERATIONS = int(os.environ.get("VLM_MAX_ITERATIONS", "30"))
+PROVIDER_PRESETS = {
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-5.1",
+        "reasoning_efforts": ["auto", "off", "low", "medium", "high"],
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": "openai/gpt-5.1",
+        "reasoning_efforts": ["auto", "off", "minimal", "low", "medium", "high", "max"],
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "default_model": "deepseek-v4-pro",
+        "reasoning_efforts": ["auto", "off", "high", "max"],
+    },
+    "dashscope": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "default_model": "qwen3.6-plus",
+        "reasoning_efforts": ["auto", "off", "minimal", "low", "medium", "high", "max"],
+    },
+    "minimax": {
+        "base_url": "https://api.minimax.io/v1",
+        "default_model": "MiniMax-M2.7",
+        "reasoning_efforts": ["auto", "off"],
+    },
+}
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -169,6 +194,13 @@ if AGENT_AVAILABLE:
                 image_paths=image_paths or [],
                 max_iterations=self.max_iterations,
                 system_prompt=self.system_prompt,
+                provider=self.endpoint.provider,
+                protocol=self.endpoint.protocol,
+                model_vendor=self.endpoint.model_vendor,
+                reasoning_effort=self.reasoning_config.effort,
+                reasoning_max_tokens=self.reasoning_config.max_tokens,
+                reasoning_exclude=self.reasoning_config.exclude,
+                reasoning_style=self.endpoint.capabilities.reasoning_style,
             )
             return recorder
 
@@ -185,12 +217,15 @@ def run_agent_thread(event_queue, session_id, prompt, image_paths, config):
     agent = WebVLMAgent(
         event_queue=event_queue,
         session_id=session_id,
-        model=config.get("model", DEFAULT_WEB_MODEL),
+        model=config.get("model"),
         api_key=config.get("api_key") or None,
         base_url=config.get("base_url") or None,
         max_iterations=config.get("max_iterations", DEFAULT_WEB_MAX_ITERATIONS),
         verbose=True,
         reasoning=config.get("reasoning", True),
+        reasoning_effort=config.get("reasoning_effort", "auto"),
+        reasoning_max_tokens=config.get("reasoning_max_tokens"),
+        provider=config.get("provider", "auto"),
     )
 
     try:
@@ -227,9 +262,8 @@ def api_config():
     return jsonify({
         "agent_available": AGENT_AVAILABLE,
         "agent_error": AGENT_IMPORT_ERROR,
-        "default_model": DEFAULT_WEB_MODEL,
-        "default_base_url": DEFAULT_WEB_BASE_URL,
         "default_max_iterations": DEFAULT_WEB_MAX_ITERATIONS,
+        "provider_presets": PROVIDER_PRESETS,
     })
 
 
@@ -242,10 +276,26 @@ def api_chat():
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
 
-    model = request.form.get("model", "").strip() or DEFAULT_WEB_MODEL
-    api_key = request.form.get("api_key", "").strip() or os.environ.get("OPENAI_API_KEY", "")
-    base_url = request.form.get("base_url", "").strip() or DEFAULT_WEB_BASE_URL
+    model = request.form.get("model", "").strip()
+    api_key = request.form.get("api_key", "").strip()
+    base_url = request.form.get("base_url", "").strip()
+    provider = request.form.get("provider", "").strip() or "auto"
+    if not api_key:
+        return jsonify({"error": "API key is required in Web settings."}), 400
+    if not base_url:
+        return jsonify({"error": "Base URL is required in Web settings."}), 400
+    if not model:
+        return jsonify({"error": "Model is required in Web settings."}), 400
+
     reasoning = request.form.get("reasoning", "true") == "true"
+    reasoning_effort = (
+        request.form.get("reasoning_effort", "").strip()
+        or "auto"
+    )
+    reasoning_max_tokens_raw = request.form.get("reasoning_max_tokens", "").strip()
+    reasoning_max_tokens = (
+        int(reasoning_max_tokens_raw) if reasoning_max_tokens_raw else None
+    )
     max_iterations = int(request.form.get("max_iterations", str(DEFAULT_WEB_MAX_ITERATIONS)))
 
     session_id = uuid.uuid4().hex[:12]
@@ -270,6 +320,9 @@ def api_chat():
             "api_key": api_key,
             "base_url": base_url,
             "reasoning": reasoning,
+            "provider": provider,
+            "reasoning_effort": reasoning_effort,
+            "reasoning_max_tokens": reasoning_max_tokens,
             "max_iterations": max_iterations,
         }),
         daemon=True,
