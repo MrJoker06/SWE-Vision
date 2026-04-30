@@ -27,6 +27,13 @@ load_dotenv(_DOTENV_PATH, override=False)
 # Constants
 # ─────────────────────────────────────────────────────────────────────
 DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+DEFAULT_PROVIDER = os.environ.get("VLM_PROVIDER", "auto")
+DEFAULT_REASONING_EFFORT = os.environ.get("VLM_REASONING_EFFORT", "auto")
+DEFAULT_REASONING_MAX_TOKENS = os.environ.get("VLM_REASONING_MAX_TOKENS", "")
+DEFAULT_REASONING_EXCLUDE = (
+    os.environ.get("VLM_REASONING_EXCLUDE", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 MAX_ITERATIONS = 20
 DEFAULT_MAX_CODE_EXECUTIONS = 5
 DEFAULT_MAX_HISTORY = 5

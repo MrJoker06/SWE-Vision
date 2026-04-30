@@ -170,6 +170,10 @@ usage: python -m swe_vision.cli [-h] [--image IMAGE] [--interactive]
                                 [--save-trajectory SAVE_TRAJECTORY]
                                 [--verbose] [--quiet]
                                 [--reasoning | --no-reasoning]
+                                [--provider PROVIDER]
+                                [--reasoning-effort {auto,off,minimal,low,medium,high,max}]
+                                [--reasoning-max-tokens REASONING_MAX_TOKENS]
+                                [--reasoning-exclude]
                                 [--max-history MAX_HISTORY]
                                 [--summary-model SUMMARY_MODEL]
                                 [--model-has-vision | --no-model-has-vision]
@@ -185,7 +189,11 @@ usage: python -m swe_vision.cli [-h] [--image IMAGE] [--interactive]
 | `--base-url` | API base URL override; otherwise uses `OPENAI_BASE_URL` |
 | `--max-iterations` | Max agentic loop iterations per query (default: `20`) |
 | `--max-code-executions` | Max successful `execute_code` calls per query (default: `5`, `0` = unlimited) |
-| `--reasoning / --no-reasoning` | Enable/disable extended reasoning |
+| `--reasoning / --no-reasoning` | Enable/disable provider reasoning controls |
+| `--provider` | Provider adapter (`auto`, `openai`, `openrouter`, `deepseek`, `dashscope`, `qwen`, `minimax`, `unknown`) |
+| `--reasoning-effort` | Provider-neutral reasoning effort: `auto`, `off`, `minimal`, `low`, `medium`, `high`, `max` |
+| `--reasoning-max-tokens` | Optional reasoning token budget for providers that support it |
+| `--reasoning-exclude` | Ask compatible providers to hide returned reasoning tokens |
 | `--max-history` | **Interactive only**. Max message count before summarization (default: `5`, `0` = unlimited) |
 | `--summary-model` | **Interactive only**. Model used for conversation summaries (default: same as `--model`) |
 | `--model-has-vision / --no-model-has-vision` | Whether the selected model can directly inspect image inputs (default: enabled) |
@@ -200,6 +208,22 @@ usage: python -m swe_vision.cli [-h] [--image IMAGE] [--interactive]
 - `--max-code-executions` counts only successful `execute_code` calls. Failed code executions do not consume this budget.
 - When the successful code execution budget is exhausted, the agent blocks further code execution and asks the model to finish from the available evidence.
 - Interactive mode keeps recent conversation context and can summarize older history once `--max-history` is reached.
+- Provider-specific reasoning parameters are mapped through `swe_vision.providers`.
+  Unknown providers use a conservative no-op mapping so unsupported reasoning
+  settings do not cause request failures.
+
+### Provider Reasoning
+
+SWE-Vision exposes a provider-neutral reasoning effort and maps it to each
+supported OpenAI-compatible endpoint:
+
+| Provider | Mapping |
+|---|---|
+| OpenAI | `reasoning_effort` for recognized reasoning models |
+| OpenRouter | `extra_body.reasoning` with `effort`, `max_tokens`, `enabled`, or `exclude` |
+| DeepSeek | `reasoning_effort` plus `extra_body.thinking.type` |
+| DashScope / Qwen | `extra_body.enable_thinking` and optional `thinking_budget` |
+| MiniMax | `extra_body.reasoning_split` to separate thinking output; strength control is not sent |
 
 ### Conversation Memory
 
@@ -219,6 +243,10 @@ is not set, the agent uses the same model specified by `--model`.
 | `OPENAI_API_KEY` | API key for the LLM provider | *(required)* |
 | `OPENAI_BASE_URL` | Custom API base URL | OpenAI default |
 | `OPENAI_MODEL` | Default model name | `gpt-4o` |
+| `VLM_PROVIDER` | Provider adapter override (`auto`, `openai`, `openrouter`, `deepseek`, `dashscope`, `minimax`) | `auto` |
+| `VLM_REASONING_EFFORT` | Default reasoning effort (`auto`, `off`, `minimal`, `low`, `medium`, `high`, `max`) | `auto` |
+| `VLM_REASONING_MAX_TOKENS` | Optional reasoning token budget | unset |
+| `VLM_REASONING_EXCLUDE` | Hide returned reasoning tokens when supported | `false` |
 | `VLM_DOCKER_IMAGE` | Docker image name for the kernel | `swe-vision:latest` |
 | `VLM_DOCKERFILE_DIR` | Path to the Dockerfile directory | `./env/` |
 | `VLM_HOST_WORK_DIR` | Host-side working directory for file sharing | `~/tmp/vlm_docker_workdir` |
@@ -235,6 +263,8 @@ async def main():
         model="openai/gpt-5.2",
         api_key="sk-...",
         reasoning=True,
+        reasoning_effort="high",
+        provider="auto",
         max_iterations=20,
         max_code_executions=5,
         model_has_vision=True,

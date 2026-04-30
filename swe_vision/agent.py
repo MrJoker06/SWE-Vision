@@ -20,6 +20,10 @@ from swe_vision.config import (
     DEFAULT_MAX_CODE_EXECUTIONS,
     DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    DEFAULT_REASONING_EFFORT,
+    DEFAULT_REASONING_EXCLUDE,
+    DEFAULT_REASONING_MAX_TOKENS,
     MAX_ITERATIONS,
     SUMMARY_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
@@ -29,6 +33,7 @@ from swe_vision.config import (
 from swe_vision.file_manager import NotebookFileManager
 from swe_vision.image_utils import make_base64_image_content_part, make_image_content_part
 from swe_vision.kernel import JupyterNotebookKernel
+from swe_vision.providers import ReasoningConfig, get_adapter, resolve_endpoint
 from swe_vision.trajectory import TrajectoryRecorder
 
 
@@ -50,6 +55,10 @@ class VLMToolCallAgent:
         verbose: bool = True,
         save_trajectory: Optional[str] = None,
         reasoning: bool = True,
+        reasoning_effort: Optional[str] = None,
+        reasoning_max_tokens: Optional[int] = None,
+        reasoning_exclude: Optional[bool] = None,
+        provider: str = DEFAULT_PROVIDER,
         max_history: int = DEFAULT_MAX_HISTORY,
         summary_model: Optional[str] = None,
         model_has_vision: bool = True,
@@ -57,31 +66,51 @@ class VLMToolCallAgent:
         self.model = model
         self.max_iterations = max_iterations
         self.max_code_executions = max_code_executions
-        self.model_has_vision = model_has_vision
-        self.system_prompt = self._with_runtime_guidance(system_prompt)
         self.verbose = verbose
-        self.reasoning = reasoning
+        self.provider = provider
         self.max_history = max_history
         self.summary_model = summary_model
 
         self._save_trajectory_dir = save_trajectory
 
+        effective_api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        effective_base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+        self.base_url = effective_base_url
+        self.endpoint = resolve_endpoint(
+            model=self.model,
+            base_url=self.base_url,
+            provider=self.provider,
+        )
+        self.model_has_vision = self._resolve_model_has_vision(model_has_vision)
+        self.system_prompt = self._with_runtime_guidance(system_prompt)
         client_kwargs = {}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        if base_url:
-            client_kwargs["base_url"] = base_url
-        elif os.environ.get("OPENAI_BASE_URL"):
-            client_kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
+        if effective_api_key:
+            client_kwargs["api_key"] = effective_api_key
+        if effective_base_url:
+            client_kwargs["base_url"] = effective_base_url
 
         self.client = OpenAI(**client_kwargs)
-
-        effective_api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        effective_base_url = base_url or client_kwargs.get("base_url")
+        env_max_tokens = _parse_optional_int(DEFAULT_REASONING_MAX_TOKENS)
+        self.reasoning_config = ReasoningConfig.from_legacy(
+            reasoning=reasoning,
+            effort=reasoning_effort or DEFAULT_REASONING_EFFORT,
+            max_tokens=(
+                reasoning_max_tokens
+                if reasoning_max_tokens is not None
+                else env_max_tokens
+            ),
+            exclude=(
+                reasoning_exclude
+                if reasoning_exclude is not None
+                else DEFAULT_REASONING_EXCLUDE
+            ),
+        )
 
         print(f"Using model: {self.model}")
         print(f"Using API key: {'set' if effective_api_key else 'None'}")
         print(f"Using base URL: {effective_base_url or 'OpenAI default'}")
+        print(f"Using provider: {self.endpoint.provider}")
+        print(f"Using reasoning effort: {self.reasoning_config.effort}")
         print(f"Model vision support: {self.model_has_vision}")
         print(
             "Max successful code executions: "
@@ -94,6 +123,22 @@ class VLMToolCallAgent:
         self.messages: List[Dict[str, Any]] = []
 
         self.trajectory: Optional[TrajectoryRecorder] = None
+
+    def _resolve_model_has_vision(self, requested: bool) -> bool:
+        provider_capability = self.endpoint.capabilities.supports_vision
+        if provider_capability is False and requested:
+            self._log(
+                "Provider '%s' does not advertise vision support for model '%s'; "
+                "image inputs will be routed through the notebook instead of "
+                "being sent as image_url content.",
+                self.endpoint.provider,
+                self.model,
+                level="warning",
+            )
+            return False
+        if provider_capability is True:
+            return True
+        return requested
 
     def _with_runtime_guidance(self, system_prompt: str) -> str:
         if self.model_has_vision:
@@ -323,11 +368,13 @@ the best answer supported by the evidence already gathered.
             tools=TOOLS,
             tool_choice="auto",
         )
-        if self.reasoning:
-            # kwargs["extra_body"] = {"reasoning": {"enabled": True, 'effort': 'xhigh'}}
-            kwargs["reasoning_effort"] = 'xhigh'
-        else:
-            kwargs["extra_body"] = {"reasoning": {"enabled": False, 'effort': 'minimal'}}
+        warnings = get_adapter(self.endpoint.provider).apply_reasoning(
+            kwargs,
+            self.endpoint,
+            self.reasoning_config,
+        )
+        for warning in warnings:
+            self._log(warning, level="warning")
 
         response = self.client.chat.completions.create(**kwargs)
         return response
@@ -406,6 +453,13 @@ the best answer supported by the evidence already gathered.
             max_code_executions=self.max_code_executions,
             system_prompt=self.system_prompt,
             model_has_vision=self.model_has_vision,
+            provider=self.endpoint.provider,
+            protocol=self.endpoint.protocol,
+            model_vendor=self.endpoint.model_vendor,
+            reasoning_effort=self.reasoning_config.effort,
+            reasoning_max_tokens=self.reasoning_config.max_tokens,
+            reasoning_exclude=self.reasoning_config.exclude,
+            reasoning_style=self.endpoint.capabilities.reasoning_style,
         )
         return recorder
 
@@ -613,10 +667,19 @@ the best answer supported by the evidence already gathered.
                         self._log("Code execution failed: %s", e, level="error")
                         text_output = f"[Execution Error] {e}\n{tb}"
 
-                    if image_parts:
+                    if image_parts and self.model_has_vision:
                         tool_content: Any = [
                             {"type": "text", "text": text_output},
                         ] + image_parts
+                    elif image_parts:
+                        tool_content = (
+                            text_output
+                            + "\n\n[Tool generated image output, but this provider "
+                            "does not accept image message content. Use the "
+                            "textual observations above or execute more Python code "
+                            "against the files in /mnt/data if more visual evidence "
+                            "is needed.]"
+                        )
                     else:
                         tool_content = text_output
 
@@ -757,3 +820,10 @@ the best answer supported by the evidence already gathered.
         """Shut down the Docker kernel and clean up resources."""
         if self.kernel:
             await self.kernel.shutdown()
+
+
+def _parse_optional_int(value: str) -> Optional[int]:
+    value = (value or "").strip()
+    if not value:
+        return None
+    return int(value)
