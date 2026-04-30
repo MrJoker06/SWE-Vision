@@ -282,11 +282,6 @@ async def main():
 asyncio.run(main())
 ```
 
-## TODO
-
-1. 思考轨迹输出
-2. Web 版本适配
-
 ## License
 
 MIT
