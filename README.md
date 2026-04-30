@@ -97,6 +97,9 @@ python -m swe_vision.cli --no-model-has-vision -i photo.png "Analyze this image 
 
 # Limit successful Python code executions for one query
 python -m swe_vision.cli --max-code-executions 5 -i photo.png "Count the small objects"
+
+# Interactive mode with conversation memory
+python -m swe_vision.cli --interactive --max-history 5 --summary-model gpt-4o
 ```
 
 
@@ -183,8 +186,8 @@ usage: python -m swe_vision.cli [-h] [--image IMAGE] [--interactive]
 | `--max-iterations` | Max agentic loop iterations per query (default: `20`) |
 | `--max-code-executions` | Max successful `execute_code` calls per query (default: `5`, `0` = unlimited) |
 | `--reasoning / --no-reasoning` | Enable/disable extended reasoning |
-| `--max-history` | Max message count before summarization in interactive mode (default: `5`, `0` = unlimited) |
-| `--summary-model` | Model used for conversation summaries (default: same as `--model`) |
+| `--max-history` | **Interactive only**. Max message count before summarization (default: `5`, `0` = unlimited) |
+| `--summary-model` | **Interactive only**. Model used for conversation summaries (default: same as `--model`) |
 | `--model-has-vision / --no-model-has-vision` | Whether the selected model can directly inspect image inputs (default: enabled) |
 | `--save-trajectory` | Custom trajectory output directory |
 | `--verbose, -v` | Verbose output (default) |
@@ -197,6 +200,17 @@ usage: python -m swe_vision.cli [-h] [--image IMAGE] [--interactive]
 - `--max-code-executions` counts only successful `execute_code` calls. Failed code executions do not consume this budget.
 - When the successful code execution budget is exhausted, the agent blocks further code execution and asks the model to finish from the available evidence.
 - Interactive mode keeps recent conversation context and can summarize older history once `--max-history` is reached.
+
+### Conversation Memory
+
+Conversation memory is enabled in `--interactive` mode. The agent keeps the
+conversation messages and the Docker-backed Jupyter kernel alive across turns.
+When the number of non-system, non-summary messages reaches `--max-history`,
+older context is compressed into a conversation summary before the next user
+turn. Set `--max-history 0` to keep the full history without summarization.
+
+Use `--summary-model` to choose a separate model for generating summaries. If it
+is not set, the agent uses the same model specified by `--model`.
 
 ## Environment Variables
 
